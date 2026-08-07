@@ -2227,6 +2227,11 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+META_WRITE_STATUS=$?
+if [ "$BACKEND" = orca ] && [ "$META_WRITE_STATUS" -ne 0 ]; then
+  echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
+  exit "$META_WRITE_STATUS"
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
