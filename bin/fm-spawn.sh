@@ -144,14 +144,15 @@
 # log; muse is crewmate/scout only and is refused for --secondmate.
 # omp (Oh My Pi) loads one firstmate-owned state/<id>.omp-ext.ts extension for its
 # semantic busy state; omp is crewmate/scout only and is refused for --secondmate.
-# omp also REQUIRES --model <provider>/<model> on every spawn, supplied by that
-# spawn's own flag and never inherited from a dispatch profile, a harness config
-# file, the environment, or omp's own default. The value is validated structurally
-# (exactly one slash between two identifier segments of letters, digits, dot,
-# underscore, or dash), passed through byte-for-byte on omp's --model flag, and
-# never accompanied by omp's legacy --provider flag. An absent, unqualified, or
-# malformed value refuses the spawn before the per-task lock and before any
-# endpoint, worktree, state, config, registry, metadata, or extension mutation.
+# omp also REQUIRES an explicit --model <provider>/<model> flag on every spawn.
+# The value is validated structurally (exactly one slash between two identifier
+# segments of letters, digits, dot, underscore, or dash), passed through
+# byte-for-byte on omp's --model flag, and never accompanied by omp's legacy
+# --provider flag. This script does not inspect where a caller obtained that
+# value and claims nothing about it; it reads no omp default and writes no
+# configuration. An absent, unqualified, or malformed value refuses the spawn
+# before the watcher guard and before any lock, endpoint, worktree, state,
+# config, registry, metadata, or extension mutation.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -233,9 +234,10 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+# The watcher guard is deliberately NOT invoked here. It writes home state, so it
+# runs below, after the arguments are parsed and the effective selection has been
+# validated: a launch this script is going to refuse must not leave a guard
+# episode behind first.
 KIND=ship
 HARNESS_ARG=
 MODEL=
@@ -352,18 +354,18 @@ else
   }
 fi
 
-# omp launch pin: every omp launch carries one explicit, fully qualified
-# provider/model, or it does not happen. omp's own selection surface fuzzy-matches
+# omp launch pin: every omp spawn carries one explicit `--model <provider>/<model>`
+# flag of its own, or it does not happen. omp's own selection surface fuzzy-matches
 # a bare model name, cycles providers, and falls back to whatever default its
-# configuration names, so an absent or unqualified value would silently launch a
-# candidate adapter on an unintended provider. The identifier must come from THIS
-# spawn's --model flag: no dispatch profile, crew/secondmate harness file,
-# environment variable, or omp configuration may supply it, and firstmate neither
-# reads nor writes an omp default. Validation is structural only - no model
-# catalog is queried and the accepted value is passed through byte-for-byte.
+# configuration names, so an absent or unqualified value would launch a candidate
+# adapter on a provider nobody chose. This script cannot see where a caller got the
+# flag's value, and it makes no claim about that; what it requires is that the
+# value arrive on this spawn's own flag, and it neither reads nor writes an omp
+# default of its own. Validation is structural only - no model catalog is queried
+# and an accepted value is passed through byte-for-byte.
 require_omp_launch_model() {
   if [ "$MODEL_SET" -ne 1 ] || [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
-    echo "error: omp requires an explicit --model <provider>/<model> on every spawn; it is never inherited from a dispatch profile, a harness config file, the environment, or omp's own default, because omp would otherwise resolve the provider itself" >&2
+    echo "error: omp requires an explicit --model <provider>/<model> flag on every spawn; without one omp would resolve the provider itself" >&2
     return 1
   fi
   if [[ ! $MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
@@ -373,13 +375,93 @@ require_omp_launch_model() {
   return 0
 }
 
-# An explicit --harness omp is refused here: before the batch re-exec, before the
-# per-task spawn lock, and before every endpoint, worktree, state, config,
-# registry, metadata, and extension mutation. The harness-resolved path is checked
-# again below, at the first point that path knows its harness at all.
-if [ "$HARNESS_ARG" = omp ]; then
+# --- effective selection, resolved once and before anything mutates ----------
+
+# Batch dispatch (see header): an `id=repo` first positional means EVERY positional
+# is a pair, so a batch carries no positional harness argument and resolves its
+# harness exactly like a single-task spawn. Detected here so the selection below
+# knows which shape it is reading; the batch loop further down reuses this flag.
+SPAWN_IDPART=${POS[0]:-}
+SPAWN_IDPART=${SPAWN_IDPART%%=*}
+SPAWN_IS_BATCH=0
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$SPAWN_IDPART" ] && case "$SPAWN_IDPART" in */*) false ;; *) true ;; esac; then
+  SPAWN_IS_BATCH=1
+fi
+
+# The positional split. This is pure string work, so it happens here rather than
+# after the per-task lock: the harness this invocation would actually launch has
+# to be known before the watcher guard runs and before anything is created.
+PROJ=
+ARG3=
+FIRSTMATE_HOME=
+if [ "$SPAWN_IS_BATCH" -eq 0 ]; then
+  if [ "$KIND" = secondmate ]; then
+    case "${POS[1]:-}" in
+      ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|omp)
+        ARG3=${POS[1]:-}
+        ;;
+      *' '*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+          FIRSTMATE_HOME=${POS[1]}
+          ARG3=${POS[2]:-}
+        else
+          ARG3=${POS[1]}
+        fi
+        ;;
+      *)
+        FIRSTMATE_HOME=${POS[1]}
+        ARG3=${POS[2]:-}
+        ;;
+    esac
+  else
+    PROJ=${POS[1]}
+    ARG3=${POS[2]:-}
+  fi
+fi
+[ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+
+# Does this invocation select omp? Read exactly the way the launch path resolves
+# the harness below - an explicit --harness, then the back-compat positional
+# argument, then this home's configured crew/secondmate harness - without copying
+# any adapter table. A positional carrying a space is a raw launch command, which
+# stays outside every adapter contract.
+spawn_selection_is_omp() {
+  local configured=
+  case "$ARG3" in
+    *' '*) return 1 ;;
+    omp) return 0 ;;
+    '') : ;;
+    *) return 1 ;;
+  esac
+  if [ "$KIND" = secondmate ]; then
+    configured=$("$FM_ROOT/bin/fm-harness.sh" secondmate 2>/dev/null || true)
+  elif [ ! -f "$CONFIG/crew-dispatch.json" ]; then
+    # With a dispatch profile active the launch path refuses an implicit harness
+    # instead of reading config/crew-harness, so neither does this.
+    configured=$("$FM_ROOT/bin/fm-harness.sh" crew 2>/dev/null || true)
+  fi
+  [ "$configured" = omp ]
+}
+
+# Every omp refusal lands here: before the watcher guard, before the batch
+# re-exec, before the per-task spawn lock, and before every endpoint, worktree,
+# state, configuration, registry, metadata, and extension mutation. It covers an
+# explicit --harness omp, the back-compat positional token, a configured crew or
+# secondmate harness, and a batch carrying any of those.
+if spawn_selection_is_omp; then
+  # omp is a candidate crewmate/scout adapter only, so a secondmate selection is
+  # refused first and unconditionally - its model is never even consulted.
+  if [ "$KIND" = secondmate ]; then
+    echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+    exit 1
+  fi
   require_omp_launch_model || exit 1
 fi
+
+# Now the watcher guard, which writes home state. Skipped when re-exec'd for one
+# pair of a batch (FM_SPAWN_NO_GUARD is set by the batch loop below), so the guard
+# runs once for the batch, not once per pair.
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -782,9 +864,7 @@ spawn_herdr_presentation_order_lock_release() {
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+if [ "$SPAWN_IS_BATCH" -eq 1 ]; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -825,33 +905,6 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
-PROJ=
-ARG3=
-FIRSTMATE_HOME=
-
-if [ "$KIND" = secondmate ]; then
-  case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|omp)
-      ARG3=${POS[1]:-}
-      ;;
-    *' '*)
-      if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-        FIRSTMATE_HOME=${POS[1]}
-        ARG3=${POS[2]:-}
-      else
-        ARG3=${POS[1]}
-      fi
-      ;;
-    *)
-      FIRSTMATE_HOME=${POS[1]}
-      ARG3=${POS[2]:-}
-      ;;
-  esac
-else
-  PROJ=${POS[1]}
-  ARG3=${POS[2]:-}
-fi
-[ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
@@ -1009,15 +1062,6 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = omp ]; then
   echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
-
-# The same launch pin for an omp reached through the back-compat positional
-# harness argument or a local config/crew-harness value, which is the earliest
-# point either of those knows its harness. A raw launch command stays out of
-# scope: the captain composed that argv themselves and owns it verbatim.
-case "$ARG3" in
-  *' '*) : ;;
-  *) [ "$HARNESS" != omp ] || require_omp_launch_model || exit 1 ;;
-esac
 
 # pi-signed is an explicitly selected executable identity, not an alias that may
 # silently fall back to pi. Resolve it from PATH before creating an endpoint and

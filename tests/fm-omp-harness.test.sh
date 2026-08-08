@@ -515,7 +515,167 @@ test_a_non_omp_harness_launch_gains_no_model_or_provider_flag() {
   pass "a non-omp harness launch is unchanged: no model or provider flag when none was requested"
 }
 
+# --- refusal ordering ------------------------------------------------------
+
+# The same environment as run_spawn but WITHOUT FM_SPAWN_NO_GUARD, so
+# bin/fm-guard.sh actually runs. The guard is the earliest writer of home state
+# on the spawn path, which is what makes it usable as an ordering probe.
+run_spawn_guarded() {  # <home> <wt> <fakebin> <spawn-args...>
+  local home=$1 wt=$2 fakebin=$3 path
+  shift 3
+  path="$fakebin:${FM_TEST_BASE_PATH:-$PATH}"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    GROK_HOME="$home/grok-home" PATH="$path" \
+    FM_OMP_STUB_LOG="${FM_OMP_STUB_LOG:-}" FM_TMUX_LOG="${FM_TMUX_LOG:-}" \
+    "$SPAWN" "$@" 2>&1
+}
+
+# Arms the two ordering probes in the current case home, and re-arms them between
+# runs:
+#   - the watcher guard writes state/.guard-watcher-stale-banner when a task is in
+#     flight and supervision is unhealthy, so a decoy task metadata file is seeded
+#     and the liveness beacon removed;
+#   - the per-task spawn lock is held by this live test process, so any spawn that
+#     reaches acquisition is refused by name.
+arm_ordering_probes() {  # <task-id>
+  local id=$1
+  rm -f "$HOME_DIR/state/.last-watcher-beat"
+  rm -f "$HOME_DIR/state/.guard-watcher-stale-banner"
+  printf 'window=fm-decoy\nharness=claude\n' > "$HOME_DIR/state/decoy.meta"
+  mkdir -p "$HOME_DIR/state/.spawn-$id.lock"
+  printf '%s\n' "$$" > "$HOME_DIR/state/.spawn-$id.lock/pid"
+}
+
+test_omp_refusal_precedes_the_watcher_guard_and_the_task_lock() {
+  local rec id=omp-order out status guard_marker
+  # config/crew-harness selects omp, so this is the configuration-selected shape:
+  # the launch passes no --harness at all.
+  rec=$(make_omp_case omp-order omp "$id")
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+
+  # Control: an accepted model runs the whole preamble, so BOTH probes fire - the
+  # guard writes its episode marker and the held lock refuses by name. Without
+  # this the pin assertions below could pass while proving nothing.
+  arm_ordering_probes "$id"
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "the held per-task spawn lock must refuse this spawn: $out"
+  assert_contains "$out" "another spawn is already creating task $id" \
+    "the held-lock probe is not blocking acquisition: $out"
+  assert_present "$guard_marker" \
+    "the watcher-guard probe never fired, so it cannot prove anything about ordering"
+
+  # The pin: with no model, neither probe is ever reached.
+  arm_ordering_probes "$id"
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a config-selected omp launch with no model must be refused: $out"
+  assert_contains "$out" "omp requires an explicit --model" \
+    "the refusal did not name the launch pin: $out"
+  assert_not_contains "$out" "another spawn is already creating" \
+    "the refusal must precede per-task spawn-lock acquisition: $out"
+  assert_absent "$guard_marker" \
+    "the refusal must precede the watcher guard's own state write"
+  rm -rf "$HOME_DIR/state/.spawn-$id.lock"
+  pass "a configuration-selected omp launch with no model is refused before the watcher guard writes state and before the task lock is acquired"
+}
+
+test_every_omp_selection_shape_refuses_before_mutation() {
+  local rec out status guard_marker
+  # The configuration-selected shape and the liveness of both probes are covered
+  # by the case above; these are the remaining selection shapes.
+
+  # Explicit --harness.
+  rec=$(make_omp_case omp-shape-explicit claude omp-shape-a)
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  arm_ordering_probes omp-shape-a
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    omp-shape-a "$PROJ_DIR" --harness omp --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "explicit --harness omp with no model must be refused: $out"
+  assert_contains "$out" "omp requires an explicit --model" "explicit shape: $out"
+  assert_not_contains "$out" "another spawn is already creating" "explicit shape reached the task lock: $out"
+  assert_absent "$guard_marker" "explicit shape was refused after the watcher guard wrote state"
+  assert_absent "$HOME_DIR/state/omp-shape-a.meta" "explicit shape published task metadata"
+
+  # The back-compat positional harness argument.
+  rec=$(make_omp_case omp-shape-positional claude omp-shape-b)
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  arm_ordering_probes omp-shape-b
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    omp-shape-b "$PROJ_DIR" omp --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a positional omp with no model must be refused: $out"
+  assert_contains "$out" "omp requires an explicit --model" "positional shape: $out"
+  assert_not_contains "$out" "another spawn is already creating" "positional shape reached the task lock: $out"
+  assert_absent "$guard_marker" "positional shape was refused after the watcher guard wrote state"
+  assert_absent "$HOME_DIR/state/omp-shape-b.meta" "positional shape published task metadata"
+
+  # Batch dispatch: refused once, up front, so no pair is ever re-exec'd.
+  rec=$(make_omp_case omp-shape-batch claude omp-shape-c)
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  mkdir -p "$HOME_DIR/data/omp-shape-d"
+  printf 'brief for omp-shape-d\n' > "$HOME_DIR/data/omp-shape-d/brief.md"
+  arm_ordering_probes omp-shape-c
+  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "omp-shape-c=$PROJ_DIR" "omp-shape-d=$PROJ_DIR" --harness omp --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a batch selecting omp with no model must be refused: $out"
+  assert_contains "$out" "omp requires an explicit --model" "batch shape: $out"
+  assert_not_contains "$out" "spawned " "a refused batch must not spawn any pair"
+  assert_not_contains "$out" "batch: FAILED" "a refused batch must be refused before any pair is attempted"
+  assert_absent "$guard_marker" "batch shape was refused after the watcher guard wrote state"
+  assert_absent "$HOME_DIR/state/omp-shape-c.meta" "batch shape published task metadata"
+  assert_absent "$HOME_DIR/state/omp-shape-d.meta" "batch shape published task metadata"
+  pass "every omp selection shape - explicit, positional, and batch - refuses a missing model before the watcher guard and before any task state"
+}
+
 # --- secondmate refusal ----------------------------------------------------
+
+test_omp_secondmate_is_refused_before_mutation_whatever_its_model() {
+  local rec id=omp-second out status guard_marker sub_home model_args
+  local want="omp is a candidate crewmate/scout adapter only"
+  rec=$(make_omp_case omp-second-order claude "$id")
+  read_case_record "$rec"
+  guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
+  sub_home="$CASE_DIR/secondmate-home"
+  # omp is refused for a secondmate on its adapter identity alone, so the model
+  # must never change the verdict: absent, structurally invalid, and fully
+  # qualified all have to land on the same refusal, before every mutation.
+  for model_args in "" "--model opus" "--model $OMP_MODEL"; do
+    rm -rf "$sub_home"
+    mkdir -p "$sub_home"
+    arm_ordering_probes "$id"
+    # shellcheck disable=SC2086  # deliberate word split: the empty case must pass NO model flag at all
+    out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+      "$id" "$sub_home" --harness omp $model_args --secondmate)
+    status=$?
+    [ "$status" -ne 0 ] || fail "omp must be refused for a secondmate ('$model_args'): $out"
+    assert_contains "$out" "$want" "secondmate refusal missing for '$model_args': $out"
+    assert_not_contains "$out" "requires an explicit --model" \
+      "the secondmate refusal must not depend on the model ('$model_args'): $out"
+    assert_not_contains "$out" "another spawn is already creating" \
+      "the secondmate refusal must precede task-lock acquisition ('$model_args'): $out"
+    assert_absent "$guard_marker" \
+      "the secondmate refusal must precede the watcher guard's own state write ('$model_args')"
+    assert_absent "$HOME_DIR/state/$id.meta" "refused omp secondmate published task metadata ('$model_args')"
+    assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "refused omp secondmate wrote the extension ('$model_args')"
+    assert_absent "$HOME_DIR/data/secondmates.md" "refused omp secondmate touched the registry ('$model_args')"
+    assert_absent "$sub_home/config" "refused omp secondmate mutated the secondmate home config ('$model_args')"
+    assert_absent "$sub_home/state" "refused omp secondmate mutated the secondmate home state ('$model_args')"
+  done
+  rm -rf "$HOME_DIR/state/.spawn-$id.lock"
+  pass "an omp secondmate is refused before the watcher guard, the task lock, and every other mutation, whether its model is absent, invalid, or fully qualified"
+}
 
 test_omp_refuses_a_secondmate_before_any_mutation() {
   local rec id=omp-secondmate out status sub_home
@@ -573,7 +733,10 @@ test_omp_model_refusal_precedes_the_per_task_spawn_lock
 test_omp_launch_carries_exactly_one_qualified_model_flag
 test_omp_resolved_from_config_still_requires_an_explicit_model
 test_a_non_omp_harness_launch_gains_no_model_or_provider_flag
+test_omp_refusal_precedes_the_watcher_guard_and_the_task_lock
+test_every_omp_selection_shape_refuses_before_mutation
 test_omp_refuses_a_secondmate_before_any_mutation
+test_omp_secondmate_is_refused_before_mutation_whatever_its_model
 test_omp_trusts_only_its_own_semantic_source
 
 echo "all fm-omp-harness tests passed"

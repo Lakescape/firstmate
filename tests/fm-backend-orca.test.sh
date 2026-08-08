@@ -721,7 +721,9 @@ test_spawn_launches_omp_through_the_orca_backend() {
   log="$LOG"
   fakebin="$FB"
   # A stub omp answering only the pinned identity probe. The installed Oh My Pi
-  # asset is never executed and no omp session is ever started.
+  # asset is never executed and no omp session is ever started. The spawn also
+  # carries the explicit --model every omp launch requires; it is a structural
+  # fixture string, so no provider is contacted and no catalog is queried.
   fm_fake_version_tool "$fakebin" omp FM_FAKE_OMP_VERSION omp/17.2.9
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-omp"}}}\n' > "$RESP/2.out"
@@ -729,7 +731,8 @@ test_spawn_launches_omp_through_the_orca_backend() {
   out=$( PATH="$fakebin:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-omp-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness omp --mode no-mistakes --yolo off --backend orca 2>&1 )
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness omp --model anthropic/claude-sonnet-4-5 \
+      --mode no-mistakes --yolo off --backend orca 2>&1 )
   expect_code 0 $? "omp spawn on the Orca backend should succeed"$'\n'"$out"
   assert_contains "$out" "spawned $id harness=omp kind=ship" "omp spawn did not report harness=omp"
   # Orca stays the backend and the sole execution cockpit for omp.
