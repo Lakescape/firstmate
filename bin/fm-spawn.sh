@@ -130,6 +130,9 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
+#     __OMPBIN__   absolute path to the pinned omp executable resolved from PATH
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state extension,
+#                  written by this script; outside the worktree like the pi one)
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -139,6 +142,8 @@
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
 # log; muse is crewmate/scout only and is refused for --secondmate.
+# omp (Oh My Pi) loads one firstmate-owned state/<id>.omp-ext.ts extension for its
+# semantic busy state; omp is crewmate/scout only and is refused for --secondmate.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -789,7 +794,7 @@ FIRSTMATE_HOME=
 
 if [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    ''|claude|codex|opencode|pi|pi-signed|grok|kimi|muse|omp)
       ARG3=${POS[1]:-}
       ;;
     *' '*)
@@ -877,6 +882,28 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # omp (Oh My Pi): a positional prompt starts the supervised interactive session,
+    # the Pi/grok/muse shape this fork inherits. omp is a CANDIDATE crewmate/scout
+    # adapter pending its separately approved first live pilot, so every axis below
+    # is deliberately narrow.
+    # --approval-mode yolo is the autonomy flag an unattended crewmate needs, the
+    # targeted equivalent of claude's --dangerously-skip-permissions.
+    # --no-title leaves the pane title firstmate's to own, --no-extensions drops
+    # every auto-discovered user/project extension, and --no-skills drops the
+    # ambient skill surface, so the only loaded extension is the firstmate-owned
+    # -e __OMPEXT__ busy-state file written below.
+    # --tools is an ALLOWLIST that limits the initially active toolset. It names
+    # only core coding tools and therefore excludes omp's `task` subagent
+    # delegation plus its extended/network surface (browser, computer,
+    # web_search, mcp). Every name here was confirmed present in the pinned
+    # v17.2.9 asset by static inspection, because omp rejects an unknown --tools
+    # name with a usage error rather than narrowing silently.
+    # No __MODELFLAG__/__EFFORTFLAG__: provider and model selection stay outside
+    # this adapter until the live pilot pins them under its own approval.
+    # The env -u prefix clears the foreign primary markers whose detection
+    # precedence would otherwise outrank omp's own, and FM_OMP_HARNESS=1 is the
+    # firstmate-owned launch marker that replaces them.
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash -e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -929,6 +956,17 @@ esac
 # secondmate whose supervision cycle could never be armed.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+  exit 1
+fi
+
+# omp is a CANDIDATE crewmate/scout adapter only. A secondmate is a firstmate
+# instance, so it needs a primary supervision protocol; omp has none under
+# docs/supervision-protocols/, and its own `task` subagent surface is exactly the
+# delegation shape a firstmate primary must not stand up. Refusing here, before
+# any endpoint, worktree, state, or config mutation, keeps that gap loud rather
+# than creating a secondmate whose supervision cycle could never be armed.
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = omp ]; then
+  echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
 
@@ -994,6 +1032,43 @@ resolve_kimi_binary() {
   fi
   echo "error: kimi executable not found; searched PATH for 'kimi' and fallback '$fallback'" >&2
   return 1
+}
+
+# The one Oh My Pi release this adapter is pinned to. omp is a candidate adapter
+# whose first live pilot is still separately approval-gated, so the launch takes
+# the EXACT reported version and refuses anything else: an absent, drifted, or
+# substituted binary must fail loudly instead of silently running an unproven
+# build under a firstmate contract written against 17.2.9.
+# Deliberately a literal with NO environment override: a pin that any caller
+# could relax is not a pin. Moving to another release is a code change that
+# comes with fresh verification.
+FM_OMP_REQUIRED_VERSION='omp/17.2.9'
+
+# resolve_omp_binary: absolute path to the pinned `omp` on PATH, or a refusal.
+# The `--version` identity probe is the ONLY invocation of the installed asset
+# on this path - no provider call, model discovery, prompt, or session - and it
+# runs after the executable itself has been resolved.
+resolve_omp_binary() {
+  local candidate dir reported
+  candidate=$(command -v omp 2>/dev/null || true)
+  if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
+    echo "error: omp executable not found on PATH; install the pinned Oh My Pi release ($FM_OMP_REQUIRED_VERSION) or select a different verified harness" >&2
+    return 1
+  fi
+  case "$candidate" in
+    /*) ;;
+    *)
+      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
+      [ -n "$dir" ] || { echo "error: omp executable '$candidate' could not be resolved to an absolute path" >&2; return 1; }
+      candidate="$dir/$(basename "$candidate")"
+      ;;
+  esac
+  reported=$("$candidate" --version 2>/dev/null | head -n 1 | tr -d '[:space:]') || reported=
+  if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
+    echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
 }
 
 resolve_muse_binary() {
@@ -1127,6 +1202,13 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
     LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
     LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__OMPBIN__*)
+    OMP_BIN=$(resolve_omp_binary) || exit 1
+    LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN")}
     ;;
 esac
 
@@ -1908,7 +1990,7 @@ if [ "$KIND" != secondmate ]; then
       ;;
   esac
   case "$HARNESS" in
-    claude*|opencode*|pi|pi-signed)
+    claude*|opencode*|pi|pi-signed|omp)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -2031,6 +2113,51 @@ export default function (pi: any) {
     return busyEvent("idle", "agent-settled");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+}
+EOF
+      ;;
+    omp)
+      # Written OUTSIDE the worktree for the same reason as the pi extension: an
+      # explicit -e path outside the project loads without the fork's
+      # project-trust gate. Lives in state/, and --no-extensions on the launch
+      # command means this is the ONLY extension omp loads.
+      cat > "$STATE/$ID.omp-ext.ts" <<EOF
+// Firstmate semantic busy-state events + turn-end notification; written by
+// fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state: "agent_start" -> busy when an agent run begins; the SETTLE
+// event -> idle only when ctx.isIdle() confirms omp is no longer streaming, so
+// auto-retries, tool loops, and queued continuations all keep the run
+// un-settled. "turn_end" fires at every inner turn boundary and stays a wake
+// NOTIFICATION touch for the watcher, never current-state truth.
+// The settle event is registered under BOTH names on purpose. The pinned
+// omp/17.2.9 asset emits "agent_end" (verified by static inspection of the
+// installed executable); "agent_settled" is the name the upstream Pi lineage
+// this fork came from uses. Registering both means whichever name the running
+// build actually emits drives the same handler, and each registration is
+// guarded so a build that rejects an unknown event name cannot break the
+// extension - and therefore cannot strand a task busy.
+import { execFile } from "node:child_process";
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+export default function (omp: any) {
+  omp.on("agent_start", () => busyEvent("busy", "agent-start"));
+  const settled = (_event: any, ctx: any) => {
+    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    return busyEvent("idle", "agent-end");
+  };
+  for (const name of ["agent_end", "agent_settled"]) {
+    try {
+      omp.on(name, settled);
+    } catch (_err) {
+      // This build does not know that settle-event name; the other one covers it.
+    }
+  }
+  omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF
       ;;
@@ -2227,11 +2354,23 @@ META_WINDOW=$T
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$STATE/$ID.meta"
+META_WRITE_STATUS=$?
+# Metadata publication is the point of no return for an Orca endpoint: every
+# later supervision, recovery, and teardown path finds the terminal and worktree
+# only through this file. If the write failed, abort BEFORE any harness command
+# is sent and leave ORCA_ABORT_CLEANUP armed, so the trap closes the exact
+# terminal and removes the exact worktree this spawn created - once - instead of
+# launching an agent into an endpoint nothing can ever reach or tear down.
+if [ "$BACKEND" = orca ] && [ "$META_WRITE_STATUS" -ne 0 ]; then
+  echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
+  exit "$META_WRITE_STATUS"
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
+sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -2242,6 +2381,7 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
