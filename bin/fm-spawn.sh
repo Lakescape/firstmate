@@ -144,6 +144,14 @@
 # log; muse is crewmate/scout only and is refused for --secondmate.
 # omp (Oh My Pi) loads one firstmate-owned state/<id>.omp-ext.ts extension for its
 # semantic busy state; omp is crewmate/scout only and is refused for --secondmate.
+# omp also REQUIRES --model <provider>/<model> on every spawn, supplied by that
+# spawn's own flag and never inherited from a dispatch profile, a harness config
+# file, the environment, or omp's own default. The value is validated structurally
+# (exactly one slash between two identifier segments of letters, digits, dot,
+# underscore, or dash), passed through byte-for-byte on omp's --model flag, and
+# never accompanied by omp's legacy --provider flag. An absent, unqualified, or
+# malformed value refuses the spawn before the per-task lock and before any
+# endpoint, worktree, state, config, registry, metadata, or extension mutation.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -342,6 +350,35 @@ else
     echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
     exit 1
   }
+fi
+
+# omp launch pin: every omp launch carries one explicit, fully qualified
+# provider/model, or it does not happen. omp's own selection surface fuzzy-matches
+# a bare model name, cycles providers, and falls back to whatever default its
+# configuration names, so an absent or unqualified value would silently launch a
+# candidate adapter on an unintended provider. The identifier must come from THIS
+# spawn's --model flag: no dispatch profile, crew/secondmate harness file,
+# environment variable, or omp configuration may supply it, and firstmate neither
+# reads nor writes an omp default. Validation is structural only - no model
+# catalog is queried and the accepted value is passed through byte-for-byte.
+require_omp_launch_model() {
+  if [ "$MODEL_SET" -ne 1 ] || [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: omp requires an explicit --model <provider>/<model> on every spawn; it is never inherited from a dispatch profile, a harness config file, the environment, or omp's own default, because omp would otherwise resolve the provider itself" >&2
+    return 1
+  fi
+  if [[ ! $MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "error: omp --model must be exactly '<provider>/<model>' - one slash between two identifier segments of letters, digits, dot, underscore, or dash (got '$MODEL')" >&2
+    return 1
+  fi
+  return 0
+}
+
+# An explicit --harness omp is refused here: before the batch re-exec, before the
+# per-task spawn lock, and before every endpoint, worktree, state, config,
+# registry, metadata, and extension mutation. The harness-resolved path is checked
+# again below, at the first point that path knows its harness at all.
+if [ "$HARNESS_ARG" = omp ]; then
+  require_omp_launch_model || exit 1
 fi
 
 spawn_remote_secondmate() {
@@ -898,12 +935,15 @@ launch_template() {
     # web_search, mcp). Every name here was confirmed present in the pinned
     # v17.2.9 asset by static inspection, because omp rejects an unknown --tools
     # name with a usage error rather than narrowing silently.
-    # No __MODELFLAG__/__EFFORTFLAG__: provider and model selection stay outside
-    # this adapter until the live pilot pins them under its own approval.
+    # __MODELFLAG__ appears exactly once and always renders: require_omp_launch_model
+    # above refuses the spawn unless this exact launch was given a fully qualified
+    # provider/model, so omp never selects a provider for itself. No
+    # __EFFORTFLAG__: the effort axis stays outside this adapter until the live
+    # pilot pins it under its own approval.
     # The env -u prefix clears the foreign primary markers whose detection
     # precedence would otherwise outrank omp's own, and FM_OMP_HARNESS=1 is the
     # firstmate-owned launch marker that replaces them.
-    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash -e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -969,6 +1009,15 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = omp ]; then
   echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
+
+# The same launch pin for an omp reached through the back-compat positional
+# harness argument or a local config/crew-harness value, which is the earliest
+# point either of those knows its harness. A raw launch command stays out of
+# scope: the captain composed that argv themselves and owns it verbatim.
+case "$ARG3" in
+  *' '*) : ;;
+  *) [ "$HARNESS" != omp ] || require_omp_launch_model || exit 1 ;;
+esac
 
 # pi-signed is an explicitly selected executable identity, not an alias that may
 # silently fall back to pi. Resolve it from PATH before creating an endpoint and
@@ -1124,7 +1173,12 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|muse|omp)
+      # omp reaches here only after require_omp_launch_model accepted a fully
+      # qualified provider/model, so the exact supplied identifier is quoted
+      # through omp's own --model flag. Its legacy --provider flag is never
+      # passed: a provider argument alongside a qualified model is the ambiguity
+      # this pin exists to remove.
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
