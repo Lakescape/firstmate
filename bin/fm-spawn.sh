@@ -2530,6 +2530,7 @@ preserve_relaunch_meta() {
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
 } > "$SPAWN_META_PATH"
+META_WRITE_STATUS=$?
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
@@ -2538,6 +2539,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP=
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
+fi
+# Fresh Orca spawns must refuse before abort cleanup is disarmed or a harness
+# prompt is sent. Bash set -e does not always stop after a failed compound
+# redirect, so publish status is checked explicitly here.
+if [ "$BACKEND" = orca ] && [ "$META_WRITE_STATUS" -ne 0 ]; then
+  echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
+  exit "$META_WRITE_STATUS"
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
