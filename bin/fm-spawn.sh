@@ -429,6 +429,32 @@ refuse_omp_secondmate() {
   echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
 }
 
+# omp is an Orca-only worker adapter. Resolve the same backend precedence used
+# by the launch path while the invocation is still read-only, then retain that
+# result so it cannot drift between this refusal and endpoint creation.
+OMP_RESOLVED_BACKEND=
+require_omp_orca_backend() {
+  local relaunch_id meta
+  if [ "$RELAUNCH" -eq 1 ]; then
+    relaunch_id=${POS[0]:-}
+    meta="$STATE/$relaunch_id.meta"
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      OMP_RESOLVED_BACKEND=$(fm_backend_of_meta "$meta")
+    else
+      OMP_RESOLVED_BACKEND=unverified
+    fi
+  elif [ "$BACKEND_SET" -eq 1 ]; then
+    OMP_RESOLVED_BACKEND=$BACKEND_ARG
+  else
+    OMP_RESOLVED_BACKEND=$(fm_backend_name)
+  fi
+  if [ "$OMP_RESOLVED_BACKEND" != orca ]; then
+    echo "error: omp requires backend=orca; resolved backend '$OMP_RESOLVED_BACKEND' is not authorized for this adapter" >&2
+    return 1
+  fi
+  return 0
+}
+
 # --- effective selection, resolved once and before anything mutates ----------
 
 # Batch dispatch (see header): an `id=repo` first positional means EVERY positional
@@ -490,10 +516,16 @@ spawn_selection_is_omp() {
     '') : ;;
     *) return 1 ;;
   esac
-  # A --relaunch with no explicit --harness adopts the harness recorded for that
-  # task, never this home's configured default, so configuration is not read for
-  # it here; the identical refusals reach it at that adoption point below.
-  [ "$RELAUNCH" -eq 0 ] || return 1
+  # A relaunch with no explicit harness adopts the recorded harness. A bounded
+  # read-only preflight lets OMP's model/backend gates still precede every lock;
+  # the normal locked endpoint validation below remains authoritative.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    fm_task_id_creation_valid "${POS[0]:-}" || return 1
+    [ -f "$STATE/${POS[0]}.meta" ] && [ ! -L "$STATE/${POS[0]}.meta" ] || return 1
+    configured=$(fm_meta_get "$STATE/${POS[0]}.meta" harness)
+    [ "$configured" = omp ]
+    return
+  fi
   if [ "$KIND" = secondmate ]; then
     configured=$("$FM_ROOT/bin/fm-harness.sh" secondmate 2>/dev/null || true)
   elif [ ! -f "$CONFIG/crew-dispatch.json" ]; then
@@ -517,6 +549,7 @@ if spawn_selection_is_omp; then
     exit 1
   fi
   require_omp_launch_model || exit 1
+  require_omp_orca_backend || exit 1
 fi
 
 # Now the watcher guard, which writes home state. Skipped when re-exec'd for one
@@ -1071,7 +1104,9 @@ fi
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
 if [ "$RELAUNCH" -eq 0 ]; then
-  if [ "$BACKEND_SET" -eq 1 ]; then
+  if [ -n "$OMP_RESOLVED_BACKEND" ]; then
+    BACKEND=$OMP_RESOLVED_BACKEND
+  elif [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
     BACKEND=$(fm_backend_name)
@@ -1288,7 +1323,7 @@ launch_template() {
     # The env -u prefix clears the foreign primary markers whose detection
     # precedence would otherwise outrank omp's own, and FM_OMP_HARNESS=1 is the
     # firstmate-owned launch marker that replaces them.
-    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -1370,6 +1405,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
     exit 1
   fi
   require_omp_launch_model || exit 1
+  [ "$BACKEND" = orca ] || {
+    echo "error: omp requires backend=orca; recorded backend '$BACKEND' is not authorized for this adapter" >&2
+    exit 1
+  }
 fi
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
@@ -2788,7 +2827,13 @@ fi
 # carrier, and this host only delivers it. The validated --traceparent value
 # then IS the decision, so the enablement snapshot handed to the new Secondmate
 # agrees with the carrier it receives exactly as on the local path.
-if [ "$TRACEPARENT_SET" -eq 1 ]; then
+if [ "$HARNESS" = omp ]; then
+  # omp is deliberately outside trace propagation until its live worker path
+  # is approved. This overrides both the frozen home decision and any ambient
+  # carrier; the launch template also removes TRACEPARENT from the child.
+  SPAWN_TRACE_EFFECTIVE=off
+  SPAWN_TRACEPARENT=
+elif [ "$TRACEPARENT_SET" -eq 1 ]; then
   SPAWN_TRACE_EFFECTIVE=on
   SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else
