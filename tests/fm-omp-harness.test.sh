@@ -773,8 +773,9 @@ case_tree_fingerprint() {
   done < <(find "$HOME_DIR" -mindepth 1 -print | LC_ALL=C sort)
 }
 
-assert_relaunch_record_refused_without_mutation() {  # <task-id> <message>
+assert_relaunch_record_refused_without_mutation() {  # <task-id> <message> [extra-positional...]
   local id=$1 want=$2 out status before after wt_before wt_after proj_before proj_after stub_log tmux_log
+  shift 2
   stub_log="$CASE_DIR/omp-relaunch-preflight-argv"
   tmux_log="$CASE_DIR/omp-relaunch-preflight-sends"
   : > "$stub_log"
@@ -793,7 +794,7 @@ assert_relaunch_record_refused_without_mutation() {  # <task-id> <message>
   wt_before=$(git -C "$WT_DIR" status --porcelain=v1)
   proj_before=$(git -C "$PROJ_DIR" status --porcelain=v1)
   out=$(FM_OMP_STUB_LOG="$stub_log" FM_TMUX_LOG="$tmux_log" \
-    run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch)
+    run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$@" --relaunch)
   status=$?
   [ "$status" -ne 0 ] || fail "$id: unsafe relaunch metadata must be refused: $out"
   assert_contains "$out" "$want" "$id: refusal did not identify the relaunch preflight: $out"
@@ -820,7 +821,7 @@ assert_relaunch_record_refused_without_mutation() {  # <task-id> <message>
 }
 
 test_relaunch_rejects_unsafe_metadata_before_every_mutation() {
-  local rec id target
+  local rec id target meta
 
   id=omp-relaunch-missing
   rec=$(make_omp_case "$id" claude "$id")
@@ -851,7 +852,94 @@ test_relaunch_rejects_unsafe_metadata_before_every_mutation() {
   rec=$(make_omp_case omp-relaunch-invalid claude omp-relaunch-fixture)
   read_case_record "$rec"
   assert_relaunch_record_refused_without_mutation '../omp-relaunch-invalid' "--relaunch requires a valid task id"
-  pass "missing, symlinked, directory, FIFO, and invalid-id relaunch records refuse before every mutation"
+
+  id=omp-relaunch-arity
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  fm_write_meta "$meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+  assert_relaunch_record_refused_without_mutation "$id" \
+    "--relaunch takes the task id only" "$PROJ_DIR"
+  pass "missing, symlinked, directory, FIFO, invalid-id, and multi-positional relaunches refuse before every mutation"
+}
+
+test_relaunch_detects_a_path_swap_while_binding_the_snapshot() {
+  local rec id=omp-relaunch-snapshot-race out status meta target trigger real_cat
+  local before after wt_before wt_after proj_before proj_after stub_log tmux_log
+  rec=$(make_omp_case "$id" claude "$id")
+  read_case_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  target="$CASE_DIR/swapped-task.meta"
+  trigger="$CASE_DIR/swap-on-path-read"
+  stub_log="$CASE_DIR/omp-relaunch-race-argv"
+  tmux_log="$CASE_DIR/omp-relaunch-race-sends"
+  real_cat=$(command -v cat) || fail "race fixture requires the system cat"
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
+    "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
+  printf 'harness=claude\nbackend=tmux\n' > "$target"
+  cat > "$FAKEBIN_DIR/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+path=
+if [ "$#" -eq 2 ] && [ "$1" = -- ]; then
+  path=$2
+elif [ "$#" -eq 1 ]; then
+  path=$1
+fi
+if [ -n "$path" ] && [ "$path" = "${FM_RELAUNCH_SWAP_META:-}" ] \
+   && [ -e "${FM_RELAUNCH_SWAP_TRIGGER:-}" ]; then
+  rm -f -- "$path"
+  ln -s -- "${FM_RELAUNCH_SWAP_TARGET:?}" "$path"
+  rm -f -- "$FM_RELAUNCH_SWAP_TRIGGER"
+fi
+exec "${FM_REAL_CAT:?}" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/cat"
+  : > "$stub_log"
+  : > "$tmux_log"
+  : > "$trigger"
+  rm -f "$HOME_DIR/state/.last-watcher-beat"
+  printf 'window=fm-decoy\nharness=claude\n' > "$HOME_DIR/state/decoy.meta"
+  mkdir -p "$HOME_DIR/state/.control-$id.lock" "$HOME_DIR/state/.spawn-$id.lock"
+  printf '%s\n' "$$" > "$HOME_DIR/state/.control-$id.lock/pid"
+  printf '%s\n' "$$" > "$HOME_DIR/state/.spawn-$id.lock/pid"
+  before=$(case_tree_fingerprint)
+  wt_before=$(git -C "$WT_DIR" status --porcelain=v1)
+  proj_before=$(git -C "$PROJ_DIR" status --porcelain=v1)
+  out=$(FM_REAL_CAT="$real_cat" FM_RELAUNCH_SWAP_META="$meta" \
+    FM_RELAUNCH_SWAP_TARGET="$target" FM_RELAUNCH_SWAP_TRIGGER="$trigger" \
+    FM_OMP_STUB_LOG="$stub_log" FM_TMUX_LOG="$tmux_log" \
+    run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+    "$id" --relaunch --model "$OMP_MODEL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "metadata path swap must refuse the relaunch: $out"
+  assert_contains "$out" "could not bind a stable regular, non-symlink metadata snapshot" \
+    "metadata path swap did not fail the stable-snapshot acquisition: $out"
+  assert_absent "$trigger" "race fixture never swapped the metadata path"
+  [ -L "$meta" ] || fail "race fixture did not replace metadata with a symlink"
+  rm -f "$meta"
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$id" \
+    "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
+    "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
+  after=$(case_tree_fingerprint)
+  wt_after=$(git -C "$WT_DIR" status --porcelain=v1)
+  proj_after=$(git -C "$PROJ_DIR" status --porcelain=v1)
+  [ "$after" = "$before" ] || fail "metadata race refusal changed the First Mate home"
+  [ "$wt_after" = "$wt_before" ] || fail "metadata race refusal changed the worktree"
+  [ "$proj_after" = "$proj_before" ] || fail "metadata race refusal changed the project"
+  assert_absent "$HOME_DIR/state/.guard-watcher-stale-banner" "metadata race reached the watcher guard"
+  assert_not_contains "$out" "another lifecycle action" "metadata race reached the control lock"
+  assert_not_contains "$out" "another spawn is already creating" "metadata race reached the task lock"
+  assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "metadata race wrote an OMP extension"
+  assert_absent "$HOME_DIR/state/$id.busy-gen" "metadata race armed busy state"
+  [ ! -s "$tmux_log" ] || fail "metadata race contacted an endpoint"
+  [ ! -s "$stub_log" ] || fail "metadata race invoked OMP"
+  pass "a deterministic metadata symlink swap during snapshot acquisition refuses before every mutation"
 }
 
 test_valid_nonomp_relaunch_passes_the_preflight() {
@@ -961,6 +1049,7 @@ test_ordering_probes_are_live
 test_omp_model_policy_matrix
 test_omp_selection_policy_matrix
 test_relaunch_rejects_unsafe_metadata_before_every_mutation
+test_relaunch_detects_a_path_swap_while_binding_the_snapshot
 test_valid_nonomp_relaunch_passes_the_preflight
 test_omp_relaunch_still_requires_the_model
 test_omp_trusts_only_its_own_semantic_source

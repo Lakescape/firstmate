@@ -434,15 +434,10 @@ refuse_omp_secondmate() {
 # result so it cannot drift between this refusal and endpoint creation.
 OMP_RESOLVED_BACKEND=
 require_omp_orca_backend() {
-  local relaunch_id meta
+  local recorded_backend
   if [ "$RELAUNCH" -eq 1 ]; then
-    relaunch_id=${POS[0]:-}
-    meta="$STATE/$relaunch_id.meta"
-    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
-      OMP_RESOLVED_BACKEND=$(fm_backend_of_meta "$meta")
-    else
-      OMP_RESOLVED_BACKEND=unverified
-    fi
+    recorded_backend=$(relaunch_preflight_meta_get backend)
+    OMP_RESOLVED_BACKEND=${recorded_backend:-tmux}
   elif [ "$BACKEND_SET" -eq 1 ]; then
     OMP_RESOLVED_BACKEND=$BACKEND_ARG
   else
@@ -457,25 +452,61 @@ require_omp_orca_backend() {
 
 # --- effective selection, resolved once and before anything mutates ----------
 
-# Batch dispatch (see header): an `id=repo` first positional means EVERY positional
-# is a pair, so a batch carries no positional harness argument and resolves its
-# harness exactly like a single-task spawn. Detected here so the selection below
-# knows which shape it is reading; the batch branch further down reuses these values.
-SPAWN_IDPART=${POS[0]:-}
-SPAWN_IDPART=${SPAWN_IDPART%%=*}
-SPAWN_IS_BATCH=0
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$SPAWN_IDPART" ] && case "$SPAWN_IDPART" in */*) false ;; *) true ;; esac; then
-  SPAWN_IS_BATCH=1
-fi
+# A relaunch may use its durable record for early adapter policy only after it
+# binds one stable identity and content snapshot.  Two independent read-only
+# descriptors must name the same regular inode and yield the same complete byte
+# sequence; the still-nonsymlink path must then name that inode and content too.
+# Downstream pre-lock consumers read the in-memory snapshot, never the path.
+RELAUNCH_PREFLIGHT_ID=
+RELAUNCH_PREFLIGHT_META=
+RELAUNCH_PREFLIGHT_META_CONTENT=
 
-# A relaunch is allowed to read one durable task record before it acquires the
-# lifecycle locks, but only after its task id proves path-safe and only when the
-# record is an existing regular, non-symlink file.  This generic preflight must
-# precede the watcher guard and every launch mutation: OMP needs the record to
-# resolve its adapter policy here, and every other harness needs the same file
-# before the locked relaunch path can safely adopt its endpoint and worktree.
+relaunch_preflight_path_signature() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%d:%i:%z:%HT' "$1" 2>/dev/null
+  else
+    LC_ALL=C stat -c '%d:%i:%s:%F' "$1" 2>/dev/null
+  fi
+}
+
+relaunch_preflight_fd_signature() {
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    LC_ALL=C stat -f '%i:%z:%HT' "/dev/fd/$1" 2>/dev/null
+  else
+    LC_ALL=C stat -L -c '%i:%s:%F' "/dev/fd/$1" 2>/dev/null
+  fi
+}
+
+relaunch_preflight_content_length() {
+  local LC_ALL=C
+  printf '%s' "${#1}"
+}
+
+relaunch_preflight_meta_get() {
+  local key=$1 line value=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done <<EOF
+$RELAUNCH_PREFLIGHT_META_CONTENT
+EOF
+  printf '%s' "$value"
+}
+
+relaunch_preflight_snapshot_refuse() {
+  { exec 8<&-; } 2>/dev/null || true
+  { exec 9<&-; } 2>/dev/null || true
+  echo "error: --relaunch could not bind a stable regular, non-symlink metadata snapshot for $RELAUNCH_PREFLIGHT_ID" >&2
+  exit 1
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
-  RELAUNCH_PREFLIGHT_ID=${POS[0]:-}
+  [ "${#POS[@]}" -eq 1 ] || {
+    echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
+    exit 1
+  }
+  RELAUNCH_PREFLIGHT_ID=${POS[0]}
   fm_task_id_creation_valid "$RELAUNCH_PREFLIGHT_ID" || {
     echo "error: --relaunch requires a valid task id" >&2
     exit 2
@@ -485,6 +516,67 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch needs an existing task record that is a regular, non-symlink metadata file for $RELAUNCH_PREFLIGHT_ID" >&2
     exit 1
   fi
+  RELAUNCH_PREFLIGHT_PATH_A=$(relaunch_preflight_path_signature "$RELAUNCH_PREFLIGHT_META") \
+    || relaunch_preflight_snapshot_refuse
+  exec 8< "$RELAUNCH_PREFLIGHT_META" || relaunch_preflight_snapshot_refuse
+  exec 9< "$RELAUNCH_PREFLIGHT_META" || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_FD_A=$(relaunch_preflight_fd_signature 8) \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_FD_B=$(relaunch_preflight_fd_signature 9) \
+    || relaunch_preflight_snapshot_refuse
+  case "$RELAUNCH_PREFLIGHT_FD_A" in
+    *':Regular File'|*':regular file') ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  [ "$RELAUNCH_PREFLIGHT_FD_A" = "$RELAUNCH_PREFLIGHT_FD_B" ] \
+    || relaunch_preflight_snapshot_refuse
+  [ "${RELAUNCH_PREFLIGHT_PATH_A#*:}" = "$RELAUNCH_PREFLIGHT_FD_A" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_A=$({ cat <&8 && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_B=$({ cat <&9 && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  exec 8<&-
+  exec 9<&-
+  case "$RELAUNCH_PREFLIGHT_META_A:$RELAUNCH_PREFLIGHT_META_B" in
+    *$'\034:'*$'\034') ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  RELAUNCH_PREFLIGHT_META_A=${RELAUNCH_PREFLIGHT_META_A%$'\034'}
+  RELAUNCH_PREFLIGHT_META_B=${RELAUNCH_PREFLIGHT_META_B%$'\034'}
+  [ "$RELAUNCH_PREFLIGHT_META_A" = "$RELAUNCH_PREFLIGHT_META_B" ] \
+    || relaunch_preflight_snapshot_refuse
+  # Strip the trailing type field before comparing the byte count.
+  RELAUNCH_PREFLIGHT_SIZE_AND_TYPE=${RELAUNCH_PREFLIGHT_FD_A#*:}
+  RELAUNCH_PREFLIGHT_SIZE=${RELAUNCH_PREFLIGHT_SIZE_AND_TYPE%%:*}
+  [ "$(relaunch_preflight_content_length "$RELAUNCH_PREFLIGHT_META_A")" = "$RELAUNCH_PREFLIGHT_SIZE" ] \
+    || relaunch_preflight_snapshot_refuse
+  [ ! -L "$RELAUNCH_PREFLIGHT_META" ] && [ -f "$RELAUNCH_PREFLIGHT_META" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_CURRENT=$({ cat -- "$RELAUNCH_PREFLIGHT_META" && printf '\034'; }) \
+    || relaunch_preflight_snapshot_refuse
+  case "$RELAUNCH_PREFLIGHT_META_CURRENT" in
+    *$'\034') RELAUNCH_PREFLIGHT_META_CURRENT=${RELAUNCH_PREFLIGHT_META_CURRENT%$'\034'} ;;
+    *) relaunch_preflight_snapshot_refuse ;;
+  esac
+  RELAUNCH_PREFLIGHT_PATH_B=$(relaunch_preflight_path_signature "$RELAUNCH_PREFLIGHT_META") \
+    || relaunch_preflight_snapshot_refuse
+  [ ! -L "$RELAUNCH_PREFLIGHT_META" ] && [ -f "$RELAUNCH_PREFLIGHT_META" ] \
+    && [ "$RELAUNCH_PREFLIGHT_PATH_B" = "$RELAUNCH_PREFLIGHT_PATH_A" ] \
+    && [ "$RELAUNCH_PREFLIGHT_META_CURRENT" = "$RELAUNCH_PREFLIGHT_META_A" ] \
+    || relaunch_preflight_snapshot_refuse
+  RELAUNCH_PREFLIGHT_META_CONTENT=$RELAUNCH_PREFLIGHT_META_A
+fi
+
+# Batch dispatch (see header): an `id=repo` first positional means EVERY positional
+# is a pair, so a batch carries no positional harness argument and resolves its
+# harness exactly like a single-task spawn. Detected here so the selection below
+# knows which shape it is reading; the batch branch further down reuses these values.
+SPAWN_IDPART=${POS[0]:-}
+SPAWN_IDPART=${SPAWN_IDPART%%=*}
+SPAWN_IS_BATCH=0
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$SPAWN_IDPART" ] && case "$SPAWN_IDPART" in */*) false ;; *) true ;; esac; then
+  SPAWN_IS_BATCH=1
 fi
 
 # The positional split for a fresh single-task spawn. This is pure string work, so
@@ -539,9 +631,7 @@ spawn_selection_is_omp() {
   # read-only preflight lets OMP's model/backend gates still precede every lock;
   # the normal locked endpoint validation below remains authoritative.
   if [ "$RELAUNCH" -eq 1 ]; then
-    fm_task_id_creation_valid "${POS[0]:-}" || return 1
-    [ -f "$STATE/${POS[0]}.meta" ] && [ ! -L "$STATE/${POS[0]}.meta" ] || return 1
-    configured=$(fm_meta_get "$STATE/${POS[0]}.meta" harness)
+    configured=$(relaunch_preflight_meta_get harness)
     [ "$configured" = omp ]
     return
   fi
