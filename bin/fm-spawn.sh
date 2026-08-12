@@ -468,6 +468,25 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$SPAWN_IDPART" ] && case "$SPAWN_
   SPAWN_IS_BATCH=1
 fi
 
+# A relaunch is allowed to read one durable task record before it acquires the
+# lifecycle locks, but only after its task id proves path-safe and only when the
+# record is an existing regular, non-symlink file.  This generic preflight must
+# precede the watcher guard and every launch mutation: OMP needs the record to
+# resolve its adapter policy here, and every other harness needs the same file
+# before the locked relaunch path can safely adopt its endpoint and worktree.
+if [ "$RELAUNCH" -eq 1 ]; then
+  RELAUNCH_PREFLIGHT_ID=${POS[0]:-}
+  fm_task_id_creation_valid "$RELAUNCH_PREFLIGHT_ID" || {
+    echo "error: --relaunch requires a valid task id" >&2
+    exit 2
+  }
+  RELAUNCH_PREFLIGHT_META="$STATE/$RELAUNCH_PREFLIGHT_ID.meta"
+  if [ -L "$RELAUNCH_PREFLIGHT_META" ] || [ ! -f "$RELAUNCH_PREFLIGHT_META" ]; then
+    echo "error: --relaunch needs an existing task record that is a regular, non-symlink metadata file for $RELAUNCH_PREFLIGHT_ID" >&2
+    exit 1
+  fi
+fi
+
 # The positional split for a fresh single-task spawn. This is pure string work, so
 # it happens here rather than after the per-task lock: the harness this invocation
 # would actually launch has to be known before the watcher guard runs and before
