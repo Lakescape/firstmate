@@ -387,14 +387,6 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
     printf 'paused'
     return
   fi
@@ -402,6 +394,18 @@ pause_state_class() {  # <window> <task>
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  # An authoritative `paused` verdict from fm-crew-state.sh already means no
+  # active run, no busy pane, and a declared external wait. A live agent process
+  # does not contradict it - an idling interactive harness reads `alive`, and an
+  # unreadable endpoint reads `unknown`, both of which are `!= dead`. The probe
+  # below exists only to let a confidently dead crew RECOVER paused
+  # classification after fm-crew-state fell back to stopped/unknown (class=none,
+  # line below); it must not veto a verdict fm-crew-state actually made.
+  if [ "$class" = paused ]; then
+    date +%s > "$recheck_file"
+    printf 'paused'
     return
   fi
   if [ "$(window_kind "$win")" != secondmate ]; then

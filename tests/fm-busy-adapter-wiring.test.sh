@@ -440,7 +440,11 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   out=$(fm_busy_classify tmux fake:w kimi gate-k "$state" '🌒 · thinking')
   [ "$out" = "unknown kimi-unverified" ] || fail "kimi must classify unknown, not from its spinner, got '$out'"
   out=$(fm_busy_classify tmux fake:w grok gate-g "$state" 'Ctrl+c:cancel')
-  [ "$out" = "busy grok-regex" ] || fail "grok must classify through its isolated fallback, got '$out'"
+  [ "$out" = "busy grok-regex" ] || fail "grok must classify 0.2.x Ctrl+c:cancel through its isolated fallback, got '$out'"
+  out=$(fm_busy_classify tmux fake:w grok gate-g "$state" '    ⠹ Thinking… 12s  13m54s [stop]')
+  [ "$out" = "busy grok-regex" ] || fail "grok must classify 1.0.4 elapsed+[stop] through its isolated fallback, got '$out'"
+  out=$(fm_busy_classify tmux fake:w grok gate-g "$state" 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "grok must not treat 1.0.4 Esc:cancel as busy, got '$out'"
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 

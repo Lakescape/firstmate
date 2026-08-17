@@ -1523,9 +1523,11 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
 fi
 
 # Both omp refusals already ran for every fresh-spawn selection shape and for
-# every relaunch the read-only preflight could classify, before the watcher
-# guard and every lock. This is defense in depth for a --relaunch that named
-# --harness omp explicitly after that preflight, and still lands before any
+# every relaunch the read-only preflight could classify from the task's own
+# record, before the watcher guard and every lock. A relaunch creates nothing
+# of its own - it adopts the endpoint, worktree, and state the task already
+# owns - and this is defense in depth for a --relaunch that named --harness
+# omp explicitly after that preflight. The refusal still lands before any
 # launch command is built or delivered. Scoped to a relaunch on purpose: a raw
 # launch command stays outside every adapter contract, exactly as it does for
 # the early gate.
@@ -3102,6 +3104,8 @@ preserve_relaunch_meta() {
   fi
 } > "$SPAWN_META_PATH"
 META_WRITE_STATUS=$?
+# Refuse the launch when Orca metadata could not be published. This runs before
+# the relaunch promotion below so a failed write is never moved into place.
 if [ "$BACKEND" = orca ] && [ "$META_WRITE_STATUS" -ne 0 ]; then
   echo "error: failed to publish Orca metadata for $ID; aborting launch" >&2
   exit "$META_WRITE_STATUS"
