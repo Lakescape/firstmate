@@ -252,6 +252,13 @@ Ctrl+c:cancel')
   # Esc:cancel is on the 1.0.4 keybind bar while idle AND mid-turn.
   out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts')
   [ "$out" = "idle grok-regex" ] || fail "Esc:cancel without [stop] is idle, not a busy token, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Enter:send now  │  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+;:queue  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "queued-send footer tokens without [stop] are not a busy signal, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "send-to-bg without [stop] is not a busy signal, got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" '     Worked for 16m26s                                                                            stop  [hooks: 6/1]
+  Shift+Tab:mode  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "just-finished Worked-for line must stay idle, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state" 'done.
 > ')
   [ "$out" = "idle grok-regex" ] || fail "grok idle tail must classify 'idle grok-regex', got '$out'"

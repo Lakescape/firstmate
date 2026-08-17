@@ -825,11 +825,14 @@ fm_busy_cursor_turn_state() {  # <transcript>
 # Grok worker-state tokens for the isolated rendered-tail fallback.
 # 0.2.x shows Ctrl+c:cancel in the keybind bar iff a turn is running.
 # 1.0.4 (measured 2026-08-17) keeps Esc:cancel in that bar while idle
-# AND while mid-turn, so that token is not a busy signal. The 1.0.4
-# mid-turn activity line carries an elapsed counter and ends in [stop]
-# (thinking: "12s ... [stop]"; tool-running: "0.2s ... [↓][stop]");
-# settled tails lack that line. This is independent of
-# FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT in bin/fm-composer-lib.sh: that
+# AND while mid-turn, so that token is not a busy signal. Enter:send now
+# and Ctrl+;:queue appear only when text is already queued mid-turn; a
+# live tool-running pane with an empty composer showed neither, so they
+# are not the busy source either. The 1.0.4 mid-turn activity line
+# carries an elapsed counter and ends in [stop] (thinking: "12s ...
+# [stop]"; tool-running: "0.7s ... [↓][stop]"); just-finished
+# "Worked for 16m26s" and idle tails lack that line. This is independent
+# of FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT in bin/fm-composer-lib.sh: that
 # variable is a delivery-only guard, and inheriting it here made a live
 # 1.0.4 pane unreadable whenever composer-lib was already sourced.
 FM_BUSY_GROK_REGEX_DEFAULT='Ctrl\+c:cancel|[0-9]+[smh].*\[stop\]'
