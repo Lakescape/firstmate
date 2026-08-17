@@ -824,13 +824,15 @@ fm_busy_cursor_turn_state() {  # <transcript>
 
 # Grok worker-state tokens for the isolated rendered-tail fallback.
 # 0.2.x shows Ctrl+c:cancel in the keybind bar iff a turn is running.
-# 1.0.4 (measured 2026-08-17) shows Esc:cancel in the same mid-turn slot.
-# Both spellings are recognized so neither release is a silent miss.
-# This is independent of FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT in
-# bin/fm-composer-lib.sh: that variable is a delivery-only guard, and
-# inheriting it here made a live 1.0.4 pane unreadable whenever
-# composer-lib was already sourced (fm-crew-state, fm-send).
-FM_BUSY_GROK_REGEX_DEFAULT='Ctrl\+c:cancel|Esc:cancel'
+# 1.0.4 (measured 2026-08-17) keeps Esc:cancel in that bar while idle
+# AND while mid-turn, so that token is not a busy signal. The 1.0.4
+# mid-turn activity line carries an elapsed counter and ends in [stop]
+# (thinking: "12s ... [stop]"; tool-running: "0.2s ... [↓][stop]");
+# settled tails lack that line. This is independent of
+# FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT in bin/fm-composer-lib.sh: that
+# variable is a delivery-only guard, and inheriting it here made a live
+# 1.0.4 pane unreadable whenever composer-lib was already sourced.
+FM_BUSY_GROK_REGEX_DEFAULT='Ctrl\+c:cancel|[0-9]+[smh].*\[stop\]'
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
