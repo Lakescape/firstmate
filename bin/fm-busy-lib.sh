@@ -822,13 +822,23 @@ fm_busy_cursor_turn_state() {  # <transcript>
   '
 }
 
+# Grok worker-state tokens for the isolated rendered-tail fallback.
+# 0.2.x shows Ctrl+c:cancel in the keybind bar iff a turn is running.
+# 1.0.4 (measured 2026-08-17) shows Esc:cancel in the same mid-turn slot.
+# Both spellings are recognized so neither release is a silent miss.
+# This is independent of FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT in
+# bin/fm-composer-lib.sh: that variable is a delivery-only guard, and
+# inheriting it here made a live 1.0.4 pane unreadable whenever
+# composer-lib was already sourced (fm-crew-state, fm-send).
+FM_BUSY_GROK_REGEX_DEFAULT='Ctrl\+c:cancel|Esc:cancel'
+
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_BUSY_GROK_REGEX_DEFAULT}"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the

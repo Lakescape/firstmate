@@ -236,10 +236,24 @@ test_grok_regex_isolated() {
   state=$(new_state_dir grok-arm)
   out=$(fm_busy_classify tmux w1 grok t1 "$state" 'thinking hard
 Ctrl+c:cancel')
-  [ "$out" = "busy grok-regex" ] || fail "grok busy tail must classify 'busy grok-regex', got '$out'"
+  [ "$out" = "busy grok-regex" ] || fail "grok 0.2.x busy tail must classify 'busy grok-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] || fail "grok 1.0.4 thinking footer must classify 'busy grok-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Enter:send now  │  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+b:send to bg  │  Ctrl+;:queue  │  Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] || fail "grok 1.0.4 tool-running footer must classify 'busy grok-regex', got '$out'"
+  # composer-lib's delivery default is 0.2.x-only and is sourced before
+  # busy-lib on the live crew-state path; worker state must not inherit it.
+  export FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Esc:cancel')
+  unset FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT
+  [ "$out" = "busy grok-regex" ] || fail "Esc:cancel must stay busy even when the delivery default is 0.2.x-only, got '$out'"
   out=$(fm_busy_classify tmux w1 grok t1 "$state" 'done.
 > ')
   [ "$out" = "idle grok-regex" ] || fail "grok idle tail must classify 'idle grok-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode │ Ctrl+.:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "grok 0.2.x idle bar must classify 'idle grok-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "a 1.0.4-shaped bar without the cancel hint must classify idle, got '$out'"
   # Another adapter's footer never makes grok busy either.
   out=$(fm_busy_classify tmux w1 grok t1 "$state" '• Working (6s • esc to interrupt)')
   [ "$out" = "idle grok-regex" ] || fail "a claude footer must not classify grok busy, got '$out'"
