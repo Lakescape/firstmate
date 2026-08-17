@@ -123,6 +123,22 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# Call pause_state_class as a sourced function against a scratch STATE. The
+# agent-liveness stub is injected after sourcing so the test can pin alive vs
+# dead without a real pane. Never points FM_STATE_OVERRIDE at the live home.
+call_pause_state_class() {  # <state> <fakebin> <window> <task> <agent-alive>
+  local state=$1 fakebin=$2 win=$3 task=$4 alive=$5
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_AGENT_ALIVE="$alive" \
+    bash -c '
+      # shellcheck disable=SC1090
+      . "$1"
+      fm_backend_agent_alive() { printf "%s\n" "${FM_FAKE_AGENT_ALIVE:-unknown}"; }
+      pause_state_class "$2" "$3"
+    ' _ "$WATCH" "$win" "$task"
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -323,6 +339,180 @@ test_crew_absorb_class_classifier() {
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+}
+
+# captain-held must not be widened by the declared-pause short-circuit.
+# fm-crew-state maps captain-held to unknown, so crew_absorb_class returns none
+# and the dead-agent recovery path stays the only way a captain-held crew can
+# become paused. This pin must pass both before and after the liveness-veto fix:
+# the current code already returns none for a live captain-held crew; the fix
+# must keep that case separate from an authoritative paused verdict.
+test_pause_state_class_captain_held_alive_stays_none() {
+  local dir state fakebin window task got
+  dir=$(make_case pause-class-captain-held); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-captain-held"
+  task="captain-held"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  printf 'captain-held: tracked by task-decision-route\n' > "$state/$task.status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · captain-held transfer'
+  got=$(call_pause_state_class "$state" "$fakebin" "$window" "$task" alive)
+  [ "$got" = none ] || fail "captain-held + unknown + live agent returned '$got' (must stay none)"
+  unset FM_FAKE_CREW_STATE
+  pass "pause_state_class: captain-held + unknown + live agent stays none"
+}
+
+# An authoritative paused verdict plus a live agent must still resurface once
+# per window once the status mtime is past PAUSE_RESURFACE_SECS. The live
+# harness must not collapse this to a plain stale or to a second wake.
+test_paused_live_agent_resurfaces_once_per_window() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf wakes
+  dir=$(make_case paused-live-resurface); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-paused-live"
+  statusf="$state/paused-live.status"
+  printf 'idle at an interactive prompt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/paused-live.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-paused-live_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle at an interactive prompt")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "aged live-agent pause did not re-surface: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "live-agent pause re-surface did not print a stale wake"
+  grep -E "paused [0-9]+s, awaiting external" "$out" >/dev/null \
+    || fail "live-agent pause re-surface was not labeled (paused …s, awaiting external …): $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "live-agent pause re-surface was mislabeled a wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "live-agent pause re-surface did not record its throttle marker"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the live-agent pause re-surface failed"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 ~ /paused [0-9]+s, awaiting external/ { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 1 ] || fail "first live-agent pause re-surface queued $wakes awaiting-external wakes, not 1"
+
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live-agent pause re-surface"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "live-agent pause re-surfaced a second time in the same window: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "second poll of a just-resurfaced live pause printed a wake: $(cat "$out")"; }
+  reap "$pid"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 ~ /paused [0-9]+s, awaiting external/ { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 0 ] || fail "second poll of a just-resurfaced live pause queued $wakes more awaiting-external wakes"
+  unset FM_FAKE_CREW_STATE
+  pass "a live-agent paused window past PAUSE_RESURFACE_SECS enqueues exactly one awaiting-external wake per window"
+}
+
+# Aging .paused-rechecked-<key> past STALE_ESCALATE_SECS must drop the fast
+# branch and re-read fm-crew-state.sh; that fresh verdict wins over the marker.
+test_paused_recheck_expiry_rereads_crew_state() {
+  local dir state fakebin window task key calls got
+  dir=$(make_case pause-recheck-expiry); state="$dir/state"; fakebin="$dir/fakebin"
+  window="test:fm-recheck-expiry"
+  task="recheck-expiry"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/$task.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/$task.status"
+  key=${window//:/_}
+  key=${key//\//_}
+  key=${key//./_}
+  : > "$state/.paused-$key"
+  : > "$state/.paused-rechecked-$key"
+  set_mtime $(( $(date +%s) - 300 )) "$state/.paused-rechecked-$key"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none · fake default}"
+printf 'called\n' >> "${FM_CREW_STATE_CALLS:-/dev/null}"
+exit 0
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+
+  export FM_CREW_STATE_CALLS="$dir/crew-state.calls"
+  : > "$FM_CREW_STATE_CALLS"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+  got=$(call_pause_state_class "$state" "$fakebin" "$window" "$task" alive)
+  [ "$got" = paused ] || fail "aged recheck + paused crew-state + live agent returned '$got' (must be paused)"
+  calls=$(wc -l < "$FM_CREW_STATE_CALLS" | tr -d ' ')
+  [ "$calls" -ge 1 ] || fail "aged recheck did not re-read fm-crew-state.sh"
+
+  # The paused short-circuit refreshes .paused-rechecked; age it again so the
+  # next call must take the slow path and honor a changed crew-state verdict.
+  set_mtime $(( $(date +%s) - 300 )) "$state/.paused-rechecked-$key"
+  : > "$FM_CREW_STATE_CALLS"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  got=$(call_pause_state_class "$state" "$fakebin" "$window" "$task" alive)
+  [ "$got" = working ] || fail "aged recheck + working crew-state returned '$got' (working verdict must win)"
+  calls=$(wc -l < "$FM_CREW_STATE_CALLS" | tr -d ' ')
+  [ "$calls" -ge 1 ] || fail "aged recheck did not re-read fm-crew-state.sh for the working verdict"
+  unset FM_FAKE_CREW_STATE FM_CREW_STATE_CALLS
+  pass "an expired .paused-rechecked marker re-reads fm-crew-state.sh and that verdict wins"
+}
+
+# Appending working: after a declared pause must drop .paused-<key> and restore
+# ordinary stale handling (immediate surface when the crew is not working).
+test_working_after_pause_clears_tracking() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case working-after-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-unpause"
+  printf 'idle at an interactive prompt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/unpause.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/unpause.status"
+  sig=$(seen_sig "$state/unpause.status"); printf '%s' "$sig" > "$state/.seen-unpause_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle at an interactive prompt")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "fresh live-agent pause surfaced instead of absorbing: $(cat "$out")"
+  fi
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "fresh live-agent pause did not record .paused-<key>"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "fresh live-agent pause printed a wake during absorb: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the absorbed live-agent pause"
+
+  printf 'working: upstream landed, resuming\n' > "$state/unpause.status"
+  sig=$(seen_sig "$state/unpause.status"); printf '%s' "$sig" > "$state/.seen-unpause_status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "working: after pause did not restore ordinary stale handling"
+  [ ! -e "$state/.paused-$key" ] || fail "working: after pause left .paused-<key> in place"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "working: after pause did not surface an ordinary stale wake"
+  grep -F "awaiting external" "$out" >/dev/null && fail "working: after pause still used the paused recheck reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after working: un-pause failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null \
+    || fail "ordinary stale after un-pause was not queued"
+  unset FM_FAKE_CREW_STATE
+  pass "appending working: after a pause clears .paused-<key> and restores ordinary stale handling"
 }
 
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
@@ -776,10 +966,10 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
 # bounded pause handling.
-# A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
+# A still-live agent with an authoritative paused verdict is absorbed on the
+# declared-pause cadence: an idling interactive harness reads alive and must
+# not veto that verdict. The unchanged hash must not escalate as a wedge.
+test_exited_declared_pause_is_bounded_and_live_pause_absorbs() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -848,20 +1038,23 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  # First sight must surface promptly so a live external-decision gate is not
-  # hidden behind the pause cadence.
+  # First sight of a live agent with an authoritative paused verdict absorbs.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "live external-decision gate did not surface immediately"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the immediate external-decision surface"
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "live authoritative paused pane surfaced immediately: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "live authoritative paused printed a wake during absorb: $(cat "$out")"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live authoritative paused did not record its pause cadence marker"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the absorbed live-agent pause"
 
-  # Re-arm with the stale timer already beyond the wedge threshold. This is the
-  # exact unchanged-hash fallback after the immediate surface: it must retain
-  # the pause cadence and discard any residual wedge timer instead of emitting
-  # a second possible-wedge wake.
+  # Re-arm with the stale timer already beyond the wedge threshold. The
+  # unchanged-hash path must retain the pause cadence and discard any residual
+  # wedge timer instead of emitting a possible-wedge wake.
   printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
@@ -870,16 +1063,16 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   pid=$!
   if ! wait_live "$pid" 30; then
     reap "$pid"
-    fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
+    fail "live authoritative paused pane escalated on the wedge timer after absorb: $(cat "$out")"
   fi
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live authoritative paused lost its pause cadence marker"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live authoritative paused retained the wedge timer"; }
   reap "$pid"
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
   bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -eq 0 ] || fail "acknowledged external-decision surface replayed $wakes wakes"
-  [ "$bare" -eq 0 ] || fail "acknowledged external-decision bare stale remained queued"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  [ "$wakes" -eq 0 ] || fail "live authoritative paused enqueued $wakes stale wakes"
+  [ "$bare" -eq 0 ] || fail "live authoritative paused enqueued $bare bare stale wakes"
+  pass "exited declared-pause and captain-held panes use bounded pause cadence; a live authoritative pause absorbs"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -1932,6 +2125,10 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_pause_state_class_captain_held_alive_stays_none
+test_paused_live_agent_resurfaces_once_per_window
+test_paused_recheck_expiry_rereads_crew_state
+test_working_after_pause_clears_tracking
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
@@ -1954,7 +2151,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_exited_declared_pause_is_bounded_and_live_pause_absorbs
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
