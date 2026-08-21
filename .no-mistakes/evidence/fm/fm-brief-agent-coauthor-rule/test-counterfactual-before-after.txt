@@ -1,0 +1,9 @@
+=== Counterfactual: tests/fm-brief.test.sh (target test file) run against BASE code 1cb900c ===
+not ok - no-mistakes brief did not carry the no-agent-co-author commit rule
+
+=== Same suite against TARGET code 82a8d63 ===
+ok - fm-brief.sh: investigation and visual-review completions load the shared decision policy
+ok - fm-brief: scout and secondmate code paths still scaffold well-formed briefs
+ok - fm-brief.sh: every crewmate scaffold forbids agent commit co-authors
+
+ok count: 21   not-ok count: 0
