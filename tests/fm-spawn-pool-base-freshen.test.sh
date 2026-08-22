@@ -46,6 +46,10 @@ make_case() {
 
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
+  # Pooled-worktree freshen is a tmux/treehouse contract. Pin it on the test
+  # home so this fixture does not inherit an ambient FM_BACKEND (orca skips
+  # freshen after creating its own worktree).
+  printf 'tmux\n' > "$home/config/backend"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
 
@@ -76,12 +80,15 @@ EOF
 run_spawn() {
   local id=$1
   shift
+  # Explicit --backend beats FM_BACKEND and config/backend. Do not unset
+  # FM_BACKEND: an ambient orca value would otherwise skip the freshen this
+  # file exists to prove.
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
+    "$SPAWN" "$id" "$PROJECT_DIR" "$@" --backend tmux 2>&1
 }
 
 test_stale_pool_base_refreshes_before_branching() {
