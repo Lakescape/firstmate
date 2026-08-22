@@ -1492,7 +1492,17 @@ launch_template() {
     # pair is here: cursor-agent does not clear its own markers, so an omp
     # worker launched from a cursor primary would otherwise inherit them and
     # self-report cursor.
-    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # OMP_SKIP_SETUP=1 is omp's OWN documented escape from the first-run
+    # onboarding wizard, and it is the reason no keystroke is ever faked here.
+    # The pinned v17.2.9 asset gates scene selection on
+    # `Bun.env.OMP_SKIP_SETUP` before it consults the startup.setupWizard
+    # setting, treating any value other than "", "0", "false", or "no" as set.
+    # Without it a fresh profile stops on a four-step wizard (provider, model,
+    # glyph mode, web search) and waits for a human forever, so an unattended
+    # spawn hangs before the agent ever reads its brief. Setting it per launch
+    # keeps the escape scoped to firstmate's own workers: it writes no omp
+    # configuration and changes nothing for the captain's own omp sessions.
+    omp) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 OMP_SKIP_SETUP=1 __OMPBIN__ --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep __MODELFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     *) return 1 ;;
   esac
 }
@@ -2841,18 +2851,25 @@ EOF
       cat > "$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state: "agent_start" -> busy when an agent run begins; the SETTLE
-// event -> idle only when ctx.isIdle() confirms omp is no longer streaming, so
-// auto-retries, tool loops, and queued continuations all keep the run
-// un-settled. "turn_end" fires at every inner turn boundary and stays a wake
-// NOTIFICATION touch for the watcher, never current-state truth.
-// The settle event is registered under BOTH names on purpose. The pinned
-// omp/17.2.9 asset emits "agent_end" (verified by static inspection of the
-// installed executable); "agent_settled" is the name the upstream Pi lineage
-// this fork came from uses. Registering both means whichever name the running
-// build actually emits drives the same handler, and each registration is
-// guarded so a build that rejects an unknown event name cannot break the
-// extension - and therefore cannot strand a task busy.
+// Semantic state: "agent_start" -> busy when an agent run begins; "agent_end"
+// -> idle when that run is terminal. "turn_end" fires at every inner turn
+// boundary and stays a wake NOTIFICATION touch for the watcher, never
+// current-state truth.
+//
+// Terminality is read from the EVENT's own willContinue field, not from
+// ctx.isIdle(). ctx.isIdle() is !session.isStreaming evaluated when the
+// handler calls it, and the pinned omp/17.2.9 asset emits agent_end
+// fire-and-forget from INSIDE the still-streaming agent loop, so isIdle() is
+// false at every real settle. Guarding on it therefore suppressed the only
+// idle event omp ever delivers and stranded every finished worker busy
+// (measured: a completed turn left state=busy event=agent-start forever).
+// omp itself decides terminality the same way this handler now does - it
+// derives isTerminal from !willContinue at the same call site - so an
+// auto-retry, tool loop, or queued continuation still reports willContinue
+// and correctly keeps the run busy.
+// Only "agent_end" is registered: it is the sole settle event this build
+// emits. The upstream Pi lineage's "agent_settled" does not exist anywhere in
+// the pinned asset, so registering it added a handler that could never fire.
 import { execFile } from "node:child_process";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
@@ -2863,17 +2880,10 @@ const busyEvent = (state: string, event: string) =>
   });
 export default function (omp: any) {
   omp.on("agent_start", () => busyEvent("busy", "agent-start"));
-  const settled = (_event: any, ctx: any) => {
-    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+  omp.on("agent_end", (event: any) => {
+    if (event && event.willContinue === true) return;
     return busyEvent("idle", "agent-end");
-  };
-  for (const name of ["agent_end", "agent_settled"]) {
-    try {
-      omp.on(name, settled);
-    } catch (_err) {
-      // This build does not know that settle-event name; the other one covers it.
-    }
-  }
+  });
   omp.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
 EOF

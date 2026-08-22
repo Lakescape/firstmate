@@ -319,6 +319,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   If your toolset has no shell, that command is not available to you: append the same
+   line to that same file with your file-writing tools instead, preserving the lines
+   already in it. The line is what wakes firstmate, not the command that wrote it.
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
@@ -432,6 +435,9 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   If your toolset has no shell, that command is not available to you: append the same
+   line to that same file with your file-writing tools instead, preserving the lines
+   already in it. The line is what wakes firstmate, not the command that wrote it.
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the

@@ -12,6 +12,11 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
 
+# fm_default_branch, the one owner of default-branch-name resolution, used below
+# to anchor every created worktree to this home's own default-branch commit.
+# shellcheck source=bin/fm-tangle-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-tangle-lib.sh"
+
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
 }
@@ -128,10 +133,42 @@ fm_backend_orca_repo_ensure() {  # <project-path>
   printf '%s' "$repo_id"
 }
 
+# Resolve the base commit a task worktree of <project-path> must be created
+# from: that checkout's OWN current default-branch commit, as a full sha.
+#
+# This exists because Orca's "repo default base" - what `orca worktree create`
+# uses when no --base-branch is passed - is the UPSTREAM remote default branch,
+# not this home's local one. Measured 2026-08-21 against orca-managed firstmate
+# (repo remote kunchenguid/firstmate): an unanchored create fetched origin and
+# produced a worktree at refs/remotes/origin/main, while local main carried
+# commits that have never landed upstream. The spawned worker then reads, edits,
+# and reports on a revision that does not contain the code it was sent to
+# change. Passing the local default-branch commit explicitly is the fix.
+#
+# Refuses rather than falling back: an unresolvable base is exactly the state
+# whose silent default produced the defect.
+fm_backend_orca_base_ref() {  # <project-path>
+  local project=$1 branch sha
+  branch=$(fm_default_branch "$project") || {
+    echo "error: cannot resolve the default branch of $project; refusing to create an Orca worktree from Orca's upstream repo default" >&2
+    return 1
+  }
+  sha=$(git -C "$project" rev-parse --verify --quiet "refs/heads/$branch^{commit}") || {
+    echo "error: $project has no local '$branch' commit to anchor an Orca worktree to; refusing to fall back to Orca's upstream repo default" >&2
+    return 1
+  }
+  [ -n "$sha" ] || {
+    echo "error: resolved an empty base commit for '$branch' in $project; refusing to create an unanchored Orca worktree" >&2
+    return 1
+  }
+  printf '%s' "$sha"
+}
+
 fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 repo_id out wt_id wt_path terminal
+  local project=$1 name=$2 repo_id base out wt_id wt_path terminal
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
-  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json) || return 1
+  base=$(fm_backend_orca_base_ref "$project") || return 1
+  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --base-branch "$base" --json) || return 1
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
     echo "error: orca worktree create did not return a worktree id for $name" >&2
     return 1

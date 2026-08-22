@@ -341,8 +341,14 @@ test_omp_launch_argv_is_contained() {
   # rather than one of omp's subcommands (auth, token, usage, setup, update,
   # plugin, marketplace, acp), which is what keeps those surfaces unreachable.
   assert_contains "$launch" \
-    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
+    "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u TRACEPARENT FM_OMP_HARNESS=1 OMP_SKIP_SETUP=1 '$FAKEBIN_DIR/omp' --approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep --model '$OMP_MODEL' -e '$HOME_DIR/state/$id.omp-ext.ts'" \
     "omp launch argv is not the contained shape"
+
+  # OMP_SKIP_SETUP is what makes an unattended spawn possible at all: without
+  # it a fresh omp profile stops on its four-step onboarding wizard and waits
+  # for a human forever. Pinned separately so it cannot be dropped silently.
+  assert_contains "$launch" "FM_OMP_HARNESS=1 OMP_SKIP_SETUP=1 " \
+    "omp launch must carry omp's own unattended-startup escape"
 
   # The allowlist is exact, so a later widening has to be deliberate.
   tools=$(printf '%s\n' "$launch" | sed -n 's/.*--tools \([^ ]*\).*/\1/p')

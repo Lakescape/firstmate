@@ -644,6 +644,31 @@ tests/fm-bootstrap.test.sh
 
 The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
 
+### Worktree base anchoring
+
+Measured 2026-08-21 against Orca bundle version 1.4.185, on an Orca-registered clone of this repo whose `origin` is the upstream `kunchenguid/firstmate` and whose local `main` carried commits that have never landed upstream.
+
+Without `--base-branch`, Orca fetched `origin` and based the new worktree on the upstream remote default branch, not on the local one:
+
+```text
+local main            1384db3b9aecf459dc19a38098844ea31cf8d98d
+origin/main (after)   fbe37e9683e35f883f87f95d6131849dc08698f2
+unanchored HEAD       fbe37e9683e35f883f87f95d6131849dc08698f2
+  merge-base --is-ancestor <local main> HEAD  -> false
+```
+
+Passing this home's own default-branch commit landed exactly that commit:
+
+```text
+anchored HEAD         1384db3b9aecf459dc19a38098844ea31cf8d98d
+  merge-base --is-ancestor <local main> HEAD  -> true
+```
+
+The same repo's reflog shows the behaviour is constant rather than intermittent: an earlier task branch recorded `branch: Created from refs/remotes/origin/main`, and only looked correctly anchored afterwards because its work was later fast-forwarded into local `main`.
+
+`bin/backends/orca.sh` therefore always passes `--base-branch`, and refuses the spawn when no local base commit resolves.
+`tests/fm-backend-orca.test.sh` pins it with a fake Orca that really checks a worktree out, asserting the spawned HEAD IS the local default-branch commit and that the unanchored call still reproduces the upstream-default landing.
+
 ## cmux
 
 The current compatibility floor is cmux 0.64, and the active live evidence uses 0.64.17 build 97 on macOS aarch64.

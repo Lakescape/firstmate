@@ -196,23 +196,41 @@ test_pi_extension_stale_incarnation_rejected() {
 
 # drive_omp_ext <ext-path> <mode>: load the generated omp extension in a plain
 # Node host and fire one lifecycle handler, exactly as drive_pi_ext does for Pi.
-# The settle handler is driven through "agent_end", the name the pinned
-# omp/17.2.9 build emits; the extension also registers the upstream Pi name
-# "agent_settled" against the same handler, and settle-legacy proves that alias
-# drives the identical transition.
+#
+# The host models the emission shape MEASURED on the pinned omp/17.2.9 build,
+# which differs from Pi's in the one way that matters. omp emits agent_end
+# fire-and-forget from inside the still-streaming agent loop and carries
+# terminality on the EVENT as willContinue, so ctx.isIdle() - which is
+# !session.isStreaming - is false at every real settle, terminal or not. This
+# host therefore pins isIdle() to false for both settle modes: an extension
+# that consults it instead of willContinue strands a finished worker busy
+# forever, and settle-idle is the case that catches it.
+# There is deliberately no legacy "agent_settled" mode. That upstream Pi name
+# does not exist anywhere in the pinned asset, so a handler registered under it
+# could never fire; settle-unregistered-alias pins that it is not registered.
 drive_omp_ext() {
   EXT_PATH="$1" MODE="$2" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
-const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
+// Measured: omp is still streaming when it emits agent_end, so isIdle() is
+// false at a genuine settle as well as a continuing one.
+const ctx = { isIdle: () => false };
 switch (process.env.MODE) {
-  case "agent-start": await handlers["agent_start"]({}, ctx); break;
-  case "settle-idle": await handlers["agent_end"]({}, ctx); break;
-  case "settle-continuing": await handlers["agent_end"]({}, ctx); break;
-  case "settle-legacy": await handlers["agent_settled"]({}, ctx); break;
-  case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  case "agent-start": await handlers["agent_start"]({ type: "agent_start" }, ctx); break;
+  case "settle-idle":
+    await handlers["agent_end"]({ type: "agent_end", messages: [] }, ctx);
+    break;
+  case "settle-continuing":
+    await handlers["agent_end"]({ type: "agent_end", messages: [], willContinue: true }, ctx);
+    break;
+  case "settle-unregistered-alias":
+    if (handlers["agent_settled"] !== undefined) {
+      throw new Error("agent_settled is registered but the pinned build never emits it");
+    }
+    break;
+  case "turn-end": await handlers["turn_end"]({ type: "turn_end" }, ctx); break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 if (process.env.MODE === "turn-end") {
@@ -243,9 +261,11 @@ test_omp_extension_semantic_lifecycle() {
   out=$(classify omp "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge, got '$out'"
 
+  # The regression: a terminal agent_end arrives while omp is still streaming,
+  # so this only reaches idle if terminality is read from the event.
   out=$(drive_omp_ext "$ext" settle-idle) || fail "agent_end drive failed: $out"
   out=$(classify omp "$id" "$state")
-  [ "$out" = "idle omp-ext" ] || fail "agent_end with isIdle must classify 'idle omp-ext', got '$out'"
+  [ "$out" = "idle omp-ext" ] || fail "a terminal agent_end must classify 'idle omp-ext' even while streaming, got '$out'"
 
   out=$(drive_omp_ext "$ext" agent-start) || fail "agent_start drive failed: $out"
   out=$(classify omp "$id" "$state")
@@ -253,12 +273,11 @@ test_omp_extension_semantic_lifecycle() {
 
   out=$(drive_omp_ext "$ext" settle-continuing) || fail "continuing settle drive failed: $out"
   out=$(classify omp "$id" "$state")
-  [ "$out" = "busy omp-ext" ] || fail "a settle while omp is still streaming must stay busy, got '$out'"
+  [ "$out" = "busy omp-ext" ] || fail "an agent_end that will continue must stay busy, got '$out'"
 
-  out=$(drive_omp_ext "$ext" settle-legacy) || fail "legacy settle-name drive failed: $out"
-  out=$(classify omp "$id" "$state")
-  [ "$out" = "idle omp-ext" ] || fail "the upstream agent_settled alias must drive the same idle edge, got '$out'"
-  pass "omp extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+  out=$(drive_omp_ext "$ext" settle-unregistered-alias) \
+    || fail "the extension must not register a settle name the pinned build never emits: $out"
+  pass "omp extension reports agent_start busy, settles idle from the event's own terminality, and keeps turn_end a notification"
 }
 
 test_omp_extension_stale_incarnation_rejected() {

@@ -548,8 +548,9 @@ Its plugin/hook engine reports `plugins are not available in this build` unless 
 ## omp (CANDIDATE, NOT LIVE-VERIFIED - Oh My Pi v17.2.9)
 
 Oh My Pi is a CANDIDATE CREWMATE and SCOUT adapter.
-The adapter is wired and deterministically proven by `tests/fm-omp-harness.test.sh` and `tests/fm-busy-adapter-wiring.test.sh` against a stub executable, but no live omp session has ever run under firstmate.
-Do not describe omp as live-verified, and do not dispatch real work on it, until the separately approved first live pilot passes.
+The adapter is wired and deterministically proven by `tests/fm-omp-harness.test.sh` and `tests/fm-busy-adapter-wiring.test.sh` against a stub executable.
+One live pilot has since run (2026-08-21, `anthropic/claude-haiku-4-5-20251001` on the Orca backend). It did NOT pass: it exposed the onboarding-wizard hang and the stranded-busy settle recorded below, both since fixed and pinned by tests, and it produced no status line because the allowlist has no shell.
+Do not describe omp as live-verified, and do not dispatch real work on it, until a live pilot passes end to end on the fixed adapter.
 Until then it is dormant: it is reachable only through an explicit `--harness omp` or a later explicit local `config/crew-harness` value, and the shipped `config/crew-harness` is unchanged.
 omp is never a coordinator, a backend, or an implicit default; Orca stays the execution backend and firstmate stays the sole coding supervisor.
 `bin/fm-spawn.sh` refuses `--secondmate` on omp on adapter identity alone, whatever its model, before the watcher guard runs and before any lock, endpoint, worktree, state, or config mutation, and omp has no supervision protocol under `docs/supervision-protocols/`.
@@ -565,9 +566,10 @@ The facts below come from static inspection of the pinned installed asset plus t
 | Launch | Positional prompt, the Pi/grok/muse shape, so the brief rides the launch command. |
 | Autonomy | `--approval-mode yolo`, the targeted equivalent of claude's `--dangerously-skip-permissions`. |
 | Presentation | `--no-title` leaves the pane title firstmate's to own. |
-| Tools | `--tools read,write,edit,ls,grep,find,bash`, an ALLOWLIST that limits the initially active set. It deliberately excludes omp's `task` subagent delegation and its browser, computer, `web_search`, and MCP surface. omp rejects an unknown `--tools` name with a usage error rather than narrowing silently, so every name was confirmed present in the pinned asset before being listed. |
+| Unattended startup | `OMP_SKIP_SETUP=1` in the launch environment, omp's own documented escape from first-run onboarding. Without it a fresh profile stops on a four-step wizard (provider, model, glyph mode, web search) and waits for a human forever, so an unattended spawn hangs before the agent reads its brief - measured on the first live pilot, which needed four manual escapes. The pinned build checks this variable before the `startup.setupWizard` setting and treats any value other than empty, `0`, `false`, or `no` as set. Firstmate sets it per launch and writes no omp configuration, so the captain's own omp sessions are unaffected. |
+| Tools | `--tools read,write,edit,glob,grep`, an ALLOWLIST that limits the initially active set. It deliberately excludes omp's `task` subagent delegation, its browser, computer, `web_search`, and MCP surface, and `bash`, so the worker cannot execute commands at all. omp rejects an unknown `--tools` name with a usage error rather than narrowing silently, so every name was confirmed against the INSTALLED binary before being listed. Narrowing is always safe; widening is a captain decision. Because there is no shell, an omp worker cannot run the `echo ... >>` status append the brief scaffold shows, cannot use `git`, and cannot drive a delivery pipeline: it appends its status line with its file-writing tools instead, and ship work needs a shell-capable harness. |
 | Extensions | `--no-extensions` plus `--no-skills` drop every auto-discovered user/project extension and the ambient skill surface, so the single `-e state/<id>.omp-ext.ts` file firstmate writes is the ONLY extension loaded. |
-| Busy state | `omp-ext`, the per-task extension above. `agent_start` opens busy; the settle event closes to idle only when `ctx.isIdle()` confirms omp is no longer streaming; `turn_end` stays a wake notification touch. |
+| Busy state | `omp-ext`, the per-task extension above. `agent_start` opens busy; `agent_end` closes to idle unless that event's own `willContinue` is true; `turn_end` stays a wake notification touch. See the settle subsection below - `ctx.isIdle()` is the wrong signal on this build and stranded the first live worker busy forever. |
 | Environment marker | None of its own. `bin/fm-spawn.sh` clears every foreign marker `bin/fm-harness.sh` tests ahead of omp - `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, `FM_PI_HARNESS`, `CURSOR_AGENT`, and `CURSOR_INVOKED_AS` - whose detection precedence would otherwise mask omp, and sets the firstmate-owned `FM_OMP_HARNESS=1` that `bin/fm-harness.sh` reads. The same `env -u` prefix also strips `TRACEPARENT`. Adding a marker ahead of omp in that resolver means adding it here too; cursor is the worked example, because cursor-agent does not clear its own markers. |
 | Liveness | `bin/backends/tmux.sh` classifies the exact process name `omp` as an agent. Never widen that to `*omp*`: `omp` is a substring of ordinary shell machinery such as `compinit`, `compdef`, and `composer`. |
 | Backend | `orca` only. The spawn resolves the backend read-only before any mutation, retains that value, and refuses any other resolved backend at the same early gate as the model pin. |
@@ -575,13 +577,17 @@ The facts below come from static inspection of the pinned installed asset plus t
 | Trace | Forced off. Spawn sets the effective decision to off, records no `traceparent=`, and strips `TRACEPARENT` from the child even when the home session froze trace on. |
 | Effort | Not wired. The effort axis stays outside this adapter until the live pilot pins it under its own approval, so no effort flag reaches the launch command. |
 
-### The settle event is named `agent_end` on this build
+### The settle event is `agent_end`, and terminality comes from the event
 
-The frozen adapter contract names Pi's `agent_settled` as the settle event.
-The pinned `omp/17.2.9` asset does not contain that string at all; it emits `agent_end`, carries a `willContinue` field, and exposes `ctx.isIdle()` as `() => !isStreaming` (verified by static inspection of the installed executable).
-`agent_settled` is the upstream Pi lineage's name for the same edge, which this fork renamed.
-The generated extension therefore registers ONE settle handler under BOTH names, each registration guarded, so whichever name the running build emits drives the same `ctx.isIdle()`-gated transition and a build that rejects an unknown event name cannot strand a task busy.
-The live pilot is what confirms which name actually fires; treat that as an open question until then.
+The frozen adapter contract named Pi's `agent_settled` as the settle event.
+The pinned `omp/17.2.9` asset does not contain that string at all: it emits `agent_end`, carrying `messages` and `willContinue`.
+`agent_settled` was the upstream Pi lineage's name for the same edge, which this fork renamed, so the extension no longer registers it - a handler under that name could never fire.
+
+The settle handler reads terminality from the EVENT's `willContinue`, never from `ctx.isIdle()`.
+`ctx.isIdle()` is `() => !session.isStreaming` evaluated when the handler calls it, and this build emits `agent_end` fire-and-forget from INSIDE the still-streaming agent loop, so it is false at every real settle, terminal or not.
+Gating on it therefore suppressed the only idle event omp ever delivers: the first live pilot completed its turn, returned to an idle prompt, and left `state=busy source=omp-ext event=agent-start` forever.
+omp itself derives `isTerminal` from `!willContinue` at that same call site, so the extension now matches the build's own definition, and an auto-retry, tool loop, or queued continuation still reports `willContinue` and correctly stays busy.
+`tests/fm-busy-adapter-wiring.test.sh` drives the generated extension in a plain Node host with `isIdle()` pinned to false, which is the live shape; an extension that consults `isIdle()` fails that test.
 
 ### Teardown removes the extension
 

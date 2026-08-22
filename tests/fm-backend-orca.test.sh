@@ -39,6 +39,84 @@ SH
   printf '%s\n' "$fb"
 }
 
+# A real git repo whose LOCAL default branch is ahead of its remote-tracking
+# origin/main, which is the exact shape that exposed the anchoring defect:
+# firstmate's own commits live on local main and never land upstream.
+#   origin/main -> "upstream" commit, no anchor-probe.txt
+#   main        -> that commit plus anchor-probe.txt
+# Echoes "<repo-path> <local-tip-sha> <origin-tip-sha>".
+orca_git_repo() {  # <dir>
+  local repo="$1/gitrepo" local_tip origin_tip
+  mkdir -p "$repo"
+  git -C "$repo" init --quiet --initial-branch=main
+  git -C "$repo" config user.email fm@example.invalid
+  git -C "$repo" config user.name fm-test
+  printf 'base\n' > "$repo/base.txt"
+  git -C "$repo" add base.txt
+  git -C "$repo" commit --quiet -m upstream
+  origin_tip=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" update-ref refs/remotes/origin/main "$origin_tip"
+  git -C "$repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  printf 'local only\n' > "$repo/anchor-probe.txt"
+  git -C "$repo" add anchor-probe.txt
+  git -C "$repo" commit --quiet -m 'local-only commit'
+  local_tip=$(git -C "$repo" rev-parse HEAD)
+  printf '%s %s %s\n' "$repo" "$local_tip" "$origin_tip"
+}
+
+# A fake orca whose `worktree create` really checks out a worktree, so the
+# assertion below is on a REAL HEAD rather than on recorded argv. It models the
+# measured v-current behaviour: with --base-branch it uses that ref, and
+# WITHOUT it it falls back to the upstream repo default (refs/remotes/origin/
+# main) exactly as the live CLI does.
+make_orca_worktree_fakebin() {  # <dir> <repo-path> -> echoes fakebin dir
+  local fb="$1/wtfakebin"
+  mkdir -p "$fb"
+  cat > "$fb/orca" <<SH
+#!/usr/bin/env bash
+set -u
+REPO='$2'
+SH
+  cat >> "$fb/orca" <<'SH'
+LOG="${FM_ORCA_LOG:?}"
+{
+  printf 'orca'
+  for a in "$@"; do printf '%s' "$a"; done
+  printf '
+'
+} >> "$LOG"
+case "${1:-}${2:-}" in
+  status*) printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}
+'; exit 0 ;;
+  reposhow) printf '{"ok":true,"result":{"repo":{"id":"repo-real"}}}
+'; exit 0 ;;
+esac
+if [ "${1:-}" = worktree ] && [ "${2:-}" = create ]; then
+  name=; base=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name=$2; shift 2 ;;
+      --base-branch) base=$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  # No explicit base: fall back to the upstream repo default, as Orca does.
+  [ -n "$base" ] || base=refs/remotes/origin/main
+  dest="${FM_ORCA_WT_DEST:?}/$name"
+  git -C "$REPO" worktree add --quiet --detach "$dest" "$base" >/dev/null 2>&1 || exit 1
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-real","path":"%s"}}}
+' "$dest"
+  exit 0
+fi
+printf '{"ok":true,"result":{}}
+'
+exit 0
+SH
+  chmod +x "$fb/orca"
+  printf '%s
+' "$fb"
+}
+
 orca_case() {  # <name> -> sets CASE_DIR LOG RESP FB
   CASE_DIR="$TMP_ROOT/$1"
   mkdir -p "$CASE_DIR/responses"
@@ -381,8 +459,11 @@ test_worktree_path_resolves_id() {
 }
 
 test_json_get_ignores_undocumented_terminal_id_shapes() {
-  local out status wt_id wt_path term
+  local out status wt_id wt_path term repo local_tip origin_tip
   orca_case parser-pruned-terminal-shapes
+  read -r repo local_tip origin_tip <<EOF
+$(orca_git_repo "$CASE_DIR")
+EOF
 
   set +e
   out=$( printf '{"ok":true,"result":{"id":"term-root-id"}}\n' | \
@@ -395,7 +476,7 @@ test_json_get_ignores_undocumented_terminal_id_shapes() {
   printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-123","path":"/tmp/orca-wt","terminal":{"handle":"term-nested"}}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" )
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-task' "$ROOT" "$repo" )
   wt_id=${out%%$'\t'*}
   wt_path=${out#*$'\t'}
   term=${wt_path#*$'\t'}
@@ -406,15 +487,79 @@ test_json_get_ignores_undocumented_terminal_id_shapes() {
   pass "fm_backend_orca_json_get: ignores undocumented terminal id shapes"
 }
 
+test_worktree_create_anchors_to_local_default_branch_commit() {
+  local repo local_tip origin_tip fb dest out wt_path head
+  orca_case anchor-local-tip
+  read -r repo local_tip origin_tip <<EOF
+$(orca_git_repo "$CASE_DIR")
+EOF
+  fb=$(make_orca_worktree_fakebin "$CASE_DIR" "$repo")
+  dest="$CASE_DIR/worktrees"
+  mkdir -p "$dest"
+
+  out=$( PATH="$fb:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_WT_DEST="$dest" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-task' "$ROOT" "$repo" ) \
+    || fail "worktree helper should succeed against a real repo"
+  wt_path=${out#*$'\t'}
+  wt_path=${wt_path%%$'\t'*}
+  [ -d "$wt_path" ] || fail "worktree helper did not produce a real worktree at '$wt_path'"
+
+  # The acceptance criterion: the spawned worktree's HEAD IS the intended base.
+  head=$(git -C "$wt_path" rev-parse HEAD)
+  [ "$head" = "$local_tip" ] \
+    || fail "spawned worktree HEAD '$head' is not this home's local default-branch commit '$local_tip'"
+  git -C "$wt_path" merge-base --is-ancestor "$local_tip" HEAD \
+    || fail "spawned worktree does not contain the local default-branch commit"
+  [ -f "$wt_path/anchor-probe.txt" ] \
+    || fail "spawned worktree is missing the local-only file, so it was based on the upstream default"
+
+  # Counterfactual: the pre-fix call passed no --base-branch, and the same fake
+  # Orca then reproduces the live upstream-default behaviour that stranded a
+  # worker on a revision without the local commits.
+  rm -rf "$dest/fm-unanchored"
+  PATH="$fb:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_WT_DEST="$dest" \
+    orca worktree create --repo id:repo-real --name fm-unanchored --no-parent --setup skip --json >/dev/null \
+    || fail "counterfactual worktree create failed"
+  head=$(git -C "$dest/fm-unanchored" rev-parse HEAD)
+  [ "$head" = "$origin_tip" ] \
+    || fail "counterfactual should land on the upstream default '$origin_tip', got '$head'"
+  [ -f "$dest/fm-unanchored/anchor-probe.txt" ] \
+    && fail "counterfactual unexpectedly contained the local-only file"
+
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create'$'\x1f''--repo'$'\x1f''id:repo-real'$'\x1f''--name'$'\x1f''fm-task'$'\x1f''--no-parent'$'\x1f''--setup'$'\x1f''skip'$'\x1f''--base-branch'$'\x1f'"$local_tip"$'\x1f''--json' \
+    "worktree helper did not pass the local default-branch commit as the explicit base"
+  pass "fm_backend_orca_worktree_create: anchors the worktree to this home's local default-branch commit"
+}
+
+test_worktree_create_refuses_when_base_cannot_be_resolved() {
+  local out status nonrepo
+  orca_case anchor-unresolvable-base
+  nonrepo="$CASE_DIR/notarepo"
+  mkdir -p "$nonrepo"
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/2.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-task' "$ROOT" "$nonrepo" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "worktree helper should refuse when no local base commit can be resolved, got '$out'"
+  case "$(cat "$LOG")" in
+    *worktree*create*) fail "worktree helper created a worktree despite an unresolvable base" ;;
+  esac
+  pass "fm_backend_orca_worktree_create: refuses rather than falling back to Orca's upstream repo default"
+}
+
 test_worktree_and_terminal_helpers_parse_json() {
-  local out wt_id wt_path term
+  local out wt_id wt_path term repo local_tip origin_tip
   orca_case lifecycle-helpers
+  read -r repo local_tip origin_tip <<EOF
+$(orca_git_repo "$CASE_DIR")
+EOF
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-123"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-123","path":"/tmp/orca-wt"}}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"handle":"term-123"}}}\n' > "$RESP/4.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" )
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-task' "$ROOT" "$repo" )
   wt_id=${out%%$'\t'*}
   wt_path=${out#*$'\t'}
   [ "$wt_id" = wt-123 ] || fail "worktree helper should print worktree id, got '$wt_id'"
@@ -422,25 +567,28 @@ test_worktree_and_terminal_helpers_parse_json() {
   term=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_terminal_create wt-123 fm-task' "$ROOT" )
   [ "$term" = term-123 ] || fail "terminal helper should print terminal handle, got '$term'"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''repo'$'\x1f''show'$'\x1f''--repo'$'\x1f''path:/repo/path'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''repo'$'\x1f''show'$'\x1f''--repo'$'\x1f'"path:$repo"$'\x1f''--json' \
     "worktree helper should first check repo registration"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''repo'$'\x1f''add'$'\x1f''--path'$'\x1f''/repo/path'$'\x1f''--json' \
+  assert_contains "$(cat "$LOG")" $'orca\x1f''repo'$'\x1f''add'$'\x1f''--path'$'\x1f'"$repo"$'\x1f''--json' \
     "worktree helper should register an absent repo"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create'$'\x1f''--repo'$'\x1f''id:repo-123'$'\x1f''--name'$'\x1f''fm-task'$'\x1f''--no-parent'$'\x1f''--setup'$'\x1f''skip'$'\x1f''--json' \
-    "worktree helper did not create an independent no-hook worktree"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create'$'\x1f''--repo'$'\x1f''id:repo-123'$'\x1f''--name'$'\x1f''fm-task'$'\x1f''--no-parent'$'\x1f''--setup'$'\x1f''skip'$'\x1f''--base-branch'$'\x1f'"$local_tip"$'\x1f''--json' \
+    "worktree helper did not create an independent no-hook worktree anchored to the local default-branch commit"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-123'$'\x1f''--title'$'\x1f''fm-task'$'\x1f''--json' \
     "terminal helper did not create a titled terminal for the worktree"
   pass "Orca lifecycle helpers: register repo, create worktree, create terminal, parse stable ids"
 }
 
 test_worktree_create_removes_worktree_when_path_missing() {
-  local out status
+  local out status repo local_tip origin_tip
   orca_case lifecycle-missing-path
+  read -r repo local_tip origin_tip <<EOF
+$(orca_git_repo "$CASE_DIR")
+EOF
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-no-path"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"worktree":{"id":"wt-no-path"},"terminal":{"handle":"term-no-path"}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create /repo/path fm-task' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-task' "$ROOT" "$repo" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "worktree helper should fail when Orca omits the worktree path"
   assert_contains "$out" "orca worktree create did not return a path for fm-task" \
@@ -758,7 +906,9 @@ test_spawn_launches_omp_through_the_orca_backend() {
   assert_no_grep "traceparent=" "$state/$id.meta" "omp must not enable trace propagation"
   assert_contains "$(cat "$log")" "FM_OMP_HARNESS=1" \
     "omp launch did not reach the Orca terminal with the firstmate-owned marker"
-  assert_contains "$(cat "$log")" "--approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,ls,grep,find,bash" \
+  assert_contains "$(cat "$log")" "OMP_SKIP_SETUP=1" \
+    "omp launch did not carry the unattended-startup escape through Orca"
+  assert_contains "$(cat "$log")" "--approval-mode yolo --no-title --no-extensions --no-skills --tools read,write,edit,glob,grep" \
     "omp launch did not carry the contained argv through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: launches the omp candidate harness with Orca as the backend"
@@ -1483,6 +1633,8 @@ test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
+test_worktree_create_anchors_to_local_default_branch_commit
+test_worktree_create_refuses_when_base_cannot_be_resolved
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
