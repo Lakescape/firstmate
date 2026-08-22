@@ -507,6 +507,7 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   d=tests/fm-supervision-instructions.test.sh
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
@@ -661,6 +662,143 @@ puts JSON.generate(
   pass "Herdr CI family-run step times out at 20 min under a 75 min job backstop"
 }
 
+test_script_timeout_kills_a_hanging_suite() {
+  local tmp hang_f out rc elapsed start end pid
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timeout.XXXXXX")
+  hang_f="$tmp/hang.test.sh"
+  out="$tmp/out.txt"
+  cat >"$hang_f" <<SH
+#!/usr/bin/env bash
+echo \$\$ > "$tmp/pid"
+exec sleep 600
+SH
+  chmod +x "$hang_f"
+  start=$(date +%s)
+  set +e
+  "$RUNNER" --script-timeout 2 "$hang_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  end=$(date +%s)
+  elapsed=$((end - start))
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a hanging suite must not exit 0"; }
+  grep -Eq '^FM_TEST_END .+ exit=124 duration_ms=[0-9]+ gate_skip=false$' "$out" \
+    || { rm -rf "$tmp"; fail "timed-out script must record exit=124: $(grep '^FM_TEST_END' "$out")"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$out" \
+    || { rm -rf "$tmp"; fail "timed-out suite must count failed=1: $(grep FM_TEST_SUMMARY "$out")"; }
+  grep -q 'timed out after 2s' "$tmp/err.txt" \
+    || { rm -rf "$tmp"; fail "runner must log the bound it hit: $(cat "$tmp/err.txt")"; }
+  [ "$elapsed" -lt 15 ] || { rm -rf "$tmp"; fail "hanging suite was not killed at the bound (${elapsed}s)"; }
+  if [ -s "$tmp/pid" ]; then
+    pid=$(cat "$tmp/pid")
+    sleep 0.4
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+      rm -rf "$tmp"
+      fail "bound left the hanging script running (pid $pid)"
+    fi
+  fi
+  rm -rf "$tmp"
+  pass "a suite that would hang is killed at the script bound"
+}
+
+test_script_timeout_zero_is_refused() {
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timeout-zero.XXXXXX")
+  set +e
+  "$RUNNER" --script-timeout 0 --list --all >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || { rm -rf "$tmp"; fail "zero bound must refuse (exit 2), got $rc"; }
+  [ ! -s "$tmp/out" ] || { rm -rf "$tmp"; fail "zero bound must not list or run tests"; }
+  grep -q 'must be >= 1' "$tmp/err" \
+    || { rm -rf "$tmp"; fail "zero-bound refusal must say it is not a bound: $(cat "$tmp/err")"; }
+  rm -rf "$tmp"
+  pass "zero script timeout is refused rather than disabling the bound"
+}
+
+test_script_timeout_leaves_a_fast_script_alone() {
+  local tmp fast_f out
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-timeout-fast.XXXXXX")
+  fast_f="$tmp/fast.test.sh"
+  cat >"$fast_f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - fast fixture"
+exit 0
+SH
+  chmod +x "$fast_f"
+  "$RUNNER" --script-timeout 5 "$fast_f" >"$tmp/out" 2>"$tmp/err" \
+    || { rm -rf "$tmp"; fail "a fast script must still pass under the bound"; }
+  grep -Eq '^FM_TEST_END .+ exit=0 duration_ms=[0-9]+ gate_skip=false$' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "fast script END is wrong: $(grep '^FM_TEST_END' "$tmp/out")"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "fast script summary is wrong: $(grep FM_TEST_SUMMARY "$tmp/out")"; }
+  rm -rf "$tmp"
+  pass "the per-script bound does not fail a script that finishes in time"
+}
+
+test_orca_host_skips_live_herdr_and_cmux_adapter_tests() {
+  local tmp herdr_f cmux_smoke_f cmux_unit_f out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-orca-skip.XXXXXX")
+  herdr_f="$tmp/fm-backend-herdr-smoke.test.sh"
+  cmux_smoke_f="$tmp/fm-backend-cmux-smoke.test.sh"
+  cmux_unit_f="$tmp/fm-backend-cmux.test.sh"
+  cat >"$herdr_f" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - live herdr smoke must not execute on backend=orca"
+exit 1
+SH
+  cat >"$cmux_smoke_f" <<'SH'
+#!/usr/bin/env bash
+echo "not ok - cmux smoke must not execute on backend=orca"
+exit 1
+SH
+  cat >"$cmux_unit_f" <<'SH'
+#!/usr/bin/env bash
+echo "ok - cmux unit still runs on backend=orca"
+exit 0
+SH
+  chmod +x "$herdr_f" "$cmux_smoke_f" "$cmux_unit_f"
+
+  set +e
+  FM_BACKEND=orca "$RUNNER" "$herdr_f" "$cmux_smoke_f" "$cmux_unit_f" \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "orca host skip battery must exit 0, got $rc: $(cat "$tmp/out") $(cat "$tmp/err")"; }
+  grep -Fqx 'skip: herdr adapter tests skipped on backend=orca' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "herdr skip is not explicit: $(cat "$tmp/out")"; }
+  grep -Fqx 'skip: cmux adapter tests skipped on backend=orca' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "cmux skip is not explicit: $(cat "$tmp/out")"; }
+  grep -Fq 'ok - cmux unit still runs on backend=orca' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "cmux unit tests must still run on orca: $(cat "$tmp/out")"; }
+  grep -q 'FM_TEST_SUMMARY total=3 failed=0 skipped_gate=2' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "orca skip summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out")"; }
+
+  mkdir -p "$tmp/config"
+  printf 'orca\n' >"$tmp/config/backend"
+  set +e
+  env -u FM_BACKEND FM_CONFIG_OVERRIDE="$tmp/config" \
+    "$RUNNER" "$herdr_f" >"$tmp/out-cfg" 2>"$tmp/err-cfg"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "config/backend=orca must skip live herdr, got $rc"; }
+  grep -Fqx 'skip: herdr adapter tests skipped on backend=orca' "$tmp/out-cfg" \
+    || { rm -rf "$tmp"; fail "config/backend=orca skip is not explicit: $(cat "$tmp/out-cfg")"; }
+
+  set +e
+  FM_BACKEND=tmux "$RUNNER" "$herdr_f" >"$tmp/out-tmux" 2>"$tmp/err-tmux"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "backend=tmux must still execute live herdr fixtures"; }
+  grep -Fq 'not ok - live herdr smoke must not execute on backend=orca' "$tmp/out-tmux" \
+    || { rm -rf "$tmp"; fail "backend=tmux ran something other than the herdr fixture: $(cat "$tmp/out-tmux")"; }
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$tmp/out-tmux" \
+    || { rm -rf "$tmp"; fail "backend=tmux herdr failure summary wrong: $(grep FM_TEST_SUMMARY "$tmp/out-tmux")"; }
+
+  rm -rf "$tmp"
+  pass "backend=orca skips live herdr/cmux adapter tests explicitly and keeps unit tests"
+}
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -720,4 +858,8 @@ test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
+test_script_timeout_kills_a_hanging_suite
+test_script_timeout_zero_is_refused
+test_script_timeout_leaves_a_fast_script_alone
+test_orca_host_skips_live_herdr_and_cmux_adapter_tests
 test_aggregate_json

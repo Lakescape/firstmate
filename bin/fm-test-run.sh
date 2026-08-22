@@ -42,6 +42,11 @@
 #                   selected script is in the proven-isolated set
 #                   (bin/fm-test-isolation-proof.sh --list). Cap is 8. Stateful
 #                   families never schedule under --jobs.
+#   --script-timeout N
+#                   hard per-script bound in seconds (default 600, or
+#                   FM_TEST_SCRIPT_TIMEOUT). Zero is refused: timeout 0 and
+#                   alarm 0 both mean no deadline. Inspection and aggregation
+#                   modes are not bounded.
 #   -h, --help      print this header
 #
 # Per-script machine-parseable markers (stdout):
@@ -56,6 +61,18 @@
 # Exit status is non-zero if any selected script exits non-zero or a configured
 # --fail-on-gate-skip token appears. Other gate skips (first meaningful line
 # matching ^skip:) remain successful and are counted as skipped_gate.
+#
+# Each executed script is process-group bounded by bin/fm-timeout-lib.sh
+# (fm_run_timed). Exit 124 means the bound was hit: the runner logs the timeout,
+# counts that script failed, and continues the rest of the selection so one hang
+# cannot stall the host.
+#
+# When the host backend is orca (FM_BACKEND or config/backend), live herdr
+# adapter tests (family real-herdr-gated) and cmux smoke/e2e adapter tests are
+# skipped with an explicit skip: line rather than executed. Those skips are
+# accepted host-run outcomes and do not fail the battery. Fake-CLI herdr/cmux
+# unit tests still run. The required Herdr CI lane does not set backend=orca and
+# still uses --fail-on-gate-skip so a missing pin cannot pass as a skip.
 #
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
@@ -88,6 +105,8 @@ EXCLUDE_FAMILIES=()
 FAIL_ON_GATE_SKIP=
 JOBS=1
 JOBS_MAX=8
+SCRIPT_TIMEOUT=
+SCRIPT_TIMEOUT_DEFAULT=600
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
@@ -237,6 +256,58 @@ expected_gate_skip_for_family() {
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
+}
+
+# Host backend for suite policy only: FM_BACKEND, else config/backend.
+# Does not auto-detect. Orca is explicit-only, so this is the complete signal
+# for "accept herdr/cmux skips on this host".
+host_backend() {
+  local line v cfg
+  if [ -n "${FM_BACKEND:-}" ]; then
+    printf '%s\n' "$FM_BACKEND"
+    return 0
+  fi
+  if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+    cfg="$FM_CONFIG_OVERRIDE/backend"
+  elif [ -n "${FM_HOME:-}" ]; then
+    cfg="$FM_HOME/config/backend"
+  else
+    return 1
+  fi
+  [ -f "$cfg" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    v=$(printf '%s' "$line" | tr -d '[:space:]')
+    if [ -n "$v" ]; then
+      printf '%s\n' "$v"
+      return 0
+    fi
+  done < "$cfg"
+  return 1
+}
+
+# Prints the skip token (without the "skip: " prefix) and returns 0 when this
+# script must not execute on an orca host. Fake-CLI unit tests still run.
+orca_skip_reason() {  # <script>
+  local script=$1 base family backend
+  backend=$(host_backend) || return 1
+  [ "$backend" = orca ] || return 1
+  base=$(basename "$script")
+  family=$(family_for_basename "$base")
+  case "$family" in
+    real-herdr-gated)
+      printf '%s\n' 'herdr adapter tests skipped on backend=orca'
+      return 0
+      ;;
+    cmux)
+      case "$base" in
+        *smoke*|*e2e*)
+          printf '%s\n' 'cmux adapter tests skipped on backend=orca'
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  return 1
 }
 
 list_known_families() {
@@ -1265,6 +1336,15 @@ while [ "$#" -gt 0 ]; do
       JOBS=${1#--jobs=}
       shift
       ;;
+    --script-timeout)
+      [ "$#" -gt 1 ] || die "--script-timeout requires a positive integer of seconds"
+      SCRIPT_TIMEOUT=$2
+      shift 2
+      ;;
+    --script-timeout=*)
+      SCRIPT_TIMEOUT=${1#--script-timeout=}
+      shift
+      ;;
     --list)
       LIST_ONLY=1
       shift
@@ -1366,6 +1446,14 @@ esac
 [ "$JOBS" -ge 1 ] || die "--jobs must be >= 1"
 [ "$JOBS" -le "$JOBS_MAX" ] || die "--jobs is capped at $JOBS_MAX (got $JOBS)"
 
+if [ -z "$SCRIPT_TIMEOUT" ]; then
+  SCRIPT_TIMEOUT=${FM_TEST_SCRIPT_TIMEOUT:-$SCRIPT_TIMEOUT_DEFAULT}
+fi
+case "$SCRIPT_TIMEOUT" in
+  ''|*[!0-9]*) die "--script-timeout / FM_TEST_SCRIPT_TIMEOUT must be a positive integer of seconds" ;;
+esac
+[ "$SCRIPT_TIMEOUT" -ge 1 ] || die "--script-timeout / FM_TEST_SCRIPT_TIMEOUT must be >= 1 (zero is not a bound)"
+
 case "${MODE:-}" in
   all)
     select_all
@@ -1411,6 +1499,7 @@ fi
 if [ "$JOBS" -gt 1 ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
 fi
+SELECTION_DESC="${SELECTION_DESC};script-timeout=${SCRIPT_TIMEOUT}s"
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
@@ -1449,6 +1538,11 @@ if [ "$JOBS" -gt 1 ]; then
     fi
   done
 fi
+
+TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh"
+[ -f "$TIMEOUT_LIB" ] || die "missing bound helper: $TIMEOUT_LIB"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$TIMEOUT_LIB"
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
@@ -1502,6 +1596,10 @@ record_script_result() {
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
 
+  if [ "$rc" -eq 124 ]; then
+    log "timed out after ${SCRIPT_TIMEOUT}s: $script"
+  fi
+
   if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
     log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
     rc=1
@@ -1543,10 +1641,16 @@ run_one_serial() {
     "$begin_iso" "$script" "$family" "$expected"
 
   set +e
-  # Stream live output while retaining a copy for gate-skip detection.
-  # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
-  rc=${PIPESTATUS[0]}
+  if reason=$(orca_skip_reason "$script"); then
+    printf 'skip: %s\n' "$reason" | tee "$out"
+    rc=0
+  else
+    # Stream live output while retaining a copy for gate-skip detection.
+    # PIPESTATUS[0] is the bounded script; tee's exit is ignored for aggregate.
+    # fm_run_timed owns the process-group bound (exit 124 = bound hit).
+    fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" 2>&1 | tee "$out"
+    rc=${PIPESTATUS[0]}
+  fi
   set -e
   : "${rc:=1}"
 
@@ -1644,6 +1748,13 @@ else
     expected=$(expected_gate_skip_for_family "$family")
     printf 'FM_TEST_BEGIN %s %s family=%s expected_gate_skip=%s\n' \
       "$(now_iso)" "$script" "$family" "$expected"
+    if reason=$(orca_skip_reason "$script"); then
+      # Record immediately: no worker, so the skip cannot inherit a worker's
+      # unset FM_BACKEND and lose the orca host signal.
+      printf 'skip: %s\n' "$reason" | tee "$work/output"
+      record_script_result "$script" 0 0 "$work/output" "$(now_iso)"
+      continue
+    fi
     (
       set +e
       export TMPDIR="$work/tmp"
@@ -1652,7 +1763,7 @@ else
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      fm_run_timed "$SCRIPT_TIMEOUT" bash "$script" >"$work/output" 2>&1
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))
