@@ -50,6 +50,7 @@ Spawn registers the repository, creates an independent worktree, reuses only the
 Every created worktree is anchored to an explicit base: this home's own current default-branch commit, passed to Orca rather than left to Orca's default.
 That default is the UPSTREAM remote default branch, so a home whose local commits have not landed upstream would otherwise get a worker reading and reporting on a revision that does not contain the code it was sent to change.
 A base that cannot be resolved refuses the spawn instead of falling back.
+Spawn must not later reset that worktree to origin's default branch, which would undo the create-time base.
 A failed metadata publication aborts the launch rather than leaving an unrecorded endpoint: the created terminal is closed and the worktree released, and when that release itself fails a minimal record is preserved so ordinary cleanup can still find both.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
 

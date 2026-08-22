@@ -104,7 +104,7 @@ if [ "${1:-}" = worktree ] && [ "${2:-}" = create ]; then
   [ -n "$base" ] || base=refs/remotes/origin/main
   dest="${FM_ORCA_WT_DEST:?}/$name"
   git -C "$REPO" worktree add --quiet --detach "$dest" "$base" >/dev/null 2>&1 || exit 1
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-real","path":"%s"}}}
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-real","path":"%s"},"terminal":{"handle":"term-real"}}}
 ' "$dest"
   exit 0
 fi
@@ -529,6 +529,69 @@ EOF
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create'$'\x1f''--repo'$'\x1f''id:repo-real'$'\x1f''--name'$'\x1f''fm-task'$'\x1f''--no-parent'$'\x1f''--setup'$'\x1f''skip'$'\x1f''--base-branch'$'\x1f'"$local_tip"$'\x1f''--json' \
     "worktree helper did not pass the local default-branch commit as the explicit base"
   pass "fm_backend_orca_worktree_create: anchors the worktree to this home's local default-branch commit"
+}
+
+# Full fm-spawn.sh --backend orca path: Orca creates the worktree at this
+# home's local default-branch commit (ahead of origin/main). The pre-fix spawn
+# then freshen-resets that worktree to origin/main, dropping the local-only
+# file. After the skip, HEAD stays the local tip and the file survives.
+attach_fetchable_origin_at_upstream() {  # <repo> <origin.git> <origin-tip>
+  local repo=$1 origin=$2 origin_tip=$3 origin_abs
+  git clone --quiet --bare "$repo" "$origin"
+  git --git-dir="$origin" update-ref refs/heads/main "$origin_tip"
+  origin_abs=$(cd "$origin" && pwd)
+  git -C "$repo" remote add origin "file://$origin_abs"
+}
+
+test_spawn_preserves_orca_local_default_branch_base() {
+  local contract id repo local_tip origin_tip fb dest origin wt_path head out status data state config
+  for contract in ship scout; do
+    id="orcalocalbase${contract}"
+    orca_case "spawn-local-base-$contract"
+    read -r repo local_tip origin_tip <<EOF
+$(orca_git_repo "$CASE_DIR")
+EOF
+    [ "$local_tip" != "$origin_tip" ] \
+      || fail "fixture did not diverge local tip from origin/main"
+    origin="$CASE_DIR/origin.git"
+    attach_fetchable_origin_at_upstream "$repo" "$origin" "$origin_tip"
+    fb=$(make_orca_worktree_fakebin "$CASE_DIR" "$repo")
+    dest="$CASE_DIR/worktrees"
+    mkdir -p "$dest"
+    data="$CASE_DIR/data"
+    state="$CASE_DIR/state"
+    config="$CASE_DIR/config"
+    mkdir -p "$data/$id" "$state" "$config"
+    printf 'brief for %s\n' "$id" > "$data/$id/brief.md"
+    touch "$state/.last-watcher-beat"
+
+    if [ "$contract" = scout ]; then
+      out=$( PATH="$fb:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_WT_DEST="$dest" \
+        FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+        FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$CASE_DIR/unused-projects" \
+        FM_SPAWN_NO_GUARD=1 \
+        "$ROOT/bin/fm-spawn.sh" "$id" "$repo" claude --scout --backend orca 2>&1 )
+    else
+      out=$( PATH="$fb:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_WT_DEST="$dest" \
+        FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+        FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$CASE_DIR/unused-projects" \
+        FM_SPAWN_NO_GUARD=1 \
+        "$ROOT/bin/fm-spawn.sh" "$id" "$repo" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+    fi
+    status=$?
+    expect_code 0 "$status" "fm-spawn.sh --backend orca $contract should succeed"$'\n'"$out"
+    wt_path="$dest/fm-$id"
+    [ -d "$wt_path" ] || fail "$contract spawn did not create a real worktree at '$wt_path'"
+    head=$(git -C "$wt_path" rev-parse HEAD)
+    [ "$head" = "$local_tip" ] \
+      || fail "$contract spawn HEAD '$head' is not the local tip '$local_tip' (origin/main is '$origin_tip')"
+    [ -f "$wt_path/anchor-probe.txt" ] \
+      || fail "$contract spawn dropped the local-only file; freshen reset the Orca worktree to origin/main"
+    assert_grep 'local only' "$wt_path/anchor-probe.txt" \
+      "$contract spawn's surviving local-only file has the wrong contents"
+    rm -rf "/tmp/fm-$id"
+  done
+  pass "fm-spawn.sh --backend orca: keeps ship and scout worktrees at this home's local default-branch commit"
 }
 
 test_worktree_create_refuses_when_base_cannot_be_resolved() {
@@ -1635,6 +1698,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_worktree_create_anchors_to_local_default_branch_commit
 test_worktree_create_refuses_when_base_cannot_be_resolved
+test_spawn_preserves_orca_local_default_branch_base
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
