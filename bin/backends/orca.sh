@@ -141,8 +141,7 @@ fm_backend_orca_run_cleanup_json() {  # <already-absent-error-code> <command...>
   shift
   out=$("$@") || command_status=$?
   if [ -z "$out" ]; then
-    [ "$command_status" -eq 0 ]
-    return
+    return "$command_status"
   fi
   if printf '%s' "$out" | fm_backend_orca_json_cleanup_ok "$absent_code"; then
     verdict=0
