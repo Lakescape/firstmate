@@ -1,0 +1,61 @@
+ATX-2169 reviewer CLI evidence
+target_commit=6f4ca8fcf8507bbb9ca2fdfdb6fc128620695cdc
+
+== Public candidate launch manifest (representative paths) ==
+{
+  "unsetEnvironment": [
+    "CLAUDECODE",
+    "PI_CODING_AGENT",
+    "PI_CONFIG_FILES",
+    "OMP_PROFILE",
+    "PI_PROFILE",
+    "GROK_AGENT",
+    "FM_PI_HARNESS",
+    "CURSOR_AGENT",
+    "CURSOR_INVOKED_AS",
+    "TRACEPARENT"
+  ],
+  "environment": {
+    "FM_OMP_HARNESS": "1",
+    "PI_CODING_AGENT_DIR": "/isolated/omp-agent"
+  },
+  "argv": [
+    "/Users/austinlakescapes/.local/bin/omp",
+    "--cwd",
+    "/isolated/empty-cwd",
+    "--add-dir",
+    "/task/worktree",
+    "--approval-mode",
+    "yolo",
+    "--no-title",
+    "--no-extensions",
+    "--no-skills",
+    "--no-lsp",
+    "--no-tools",
+    "--model",
+    "anthropic/claude-sonnet-4-5",
+    "-e",
+    "/state/task.omp-ext.ts"
+  ]
+}
+
+== End-user request: exact explicit OMP candidate ==
+error: omp is dormant until both a supported session-free omp/17.2.9 consumer proves effective configuration and tool containment and ATX-2170 independently verifies First Mate interrupt, exit, and relaunch control; neither mandatory gate substitutes for the other; refusing every runnable OMP launch
+exit_status=1
+task_metadata=absent (no live endpoint published)
+
+== End-user request: OMP without explicit provider/model ==
+error: omp requires an explicit --model <provider>/<model> flag on every spawn; without one omp would resolve the provider itself
+exit_status=1
+
+== End-user request: forbidden OMP secondmate role ==
+error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates.
+exit_status=1
+
+== Candidate input validator: forbidden command parsers ==
+input=/tools
+error: OMP candidate refuses slash and bang command input; use First Mate control for lifecycle actions
+exit_status=1
+input=!pwd
+error: OMP candidate refuses slash and bang command input; use First Mate control for lifecycle actions
+exit_status=1
