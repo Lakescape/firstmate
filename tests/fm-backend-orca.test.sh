@@ -550,6 +550,75 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves and tears down an ID-only recovery record"
 }
 
+test_spawn_preserves_pathless_terminal_when_close_fails() {
+  local proj data state config id out status neutral endpoint_out endpoint_status teardown_out teardown_status
+  local worktree_id terminal_id close_count remove_count
+  id="orcapathtermz7"
+  worktree_id="verified-nonexistent-worktree-pathless"
+  terminal_id="verified-nonexistent-terminal-pathless"
+  proj="$TMP_ROOT/pathless-terminal-project"
+  data="$TMP_ROOT/pathless-terminal-data"
+  state="$TMP_ROOT/pathless-terminal-state"
+  config="$TMP_ROOT/pathless-terminal-config"
+  fm_git_init_commit "$proj"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case pathless-terminal-close-fail
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"verified-nonexistent-repo-pathless"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"%s"},"terminal":{"handle":"%s"}}}\n' \
+    "$worktree_id" "$terminal_id" > "$RESP/3.out"
+  printf '1\n' > "$RESP/4.exit"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/5.out"
+  printf '1\n' > "$RESP/6.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "Orca spawn should fail when path parsing fails"
+  assert_contains "$out" "orca worktree create did not return a path" \
+    "pathless terminal recovery should explain the missing path"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"$terminal_id"$'\x1f''--json' \
+    "pathless cleanup should attempt to close the exact synthetic terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--force'$'\x1f''--json' \
+    "pathless cleanup should remove the exact synthetic worktree independently"
+  close_count=$(grep -cF $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"$terminal_id"$'\x1f''--json' "$LOG")
+  [ "$close_count" -eq 2 ] \
+    || fail "pathless recovery should retry the failed terminal close exactly once, got $close_count attempts"
+  remove_count=$(grep -cF $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--force'$'\x1f''--json' "$LOG")
+  [ "$remove_count" -eq 1 ] \
+    || fail "successful pathless worktree removal must not be repeated, got $remove_count attempts"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send' \
+    "pathless cleanup failure must not submit a launch command"
+  assert_present "$state/$id.meta" "a surviving pathless terminal should publish recovery metadata"
+  assert_grep "window=fm-$id" "$state/$id.meta" "terminal-only recovery metadata missing stable window alias"
+  assert_grep "backend=orca" "$state/$id.meta" "terminal-only recovery metadata missing backend=orca"
+  assert_grep "terminal=$terminal_id" "$state/$id.meta" "terminal-only recovery metadata missing the exact terminal"
+  assert_grep "orca_allocation=terminal-only" "$state/$id.meta" "terminal-only recovery metadata missing its allocation state"
+  assert_grep "worktree=" "$state/$id.meta" "terminal-only recovery metadata should carry no worktree path"
+  assert_no_grep "orca_worktree_id=" "$state/$id.meta" "a removed pathless worktree must not remain in recovery metadata"
+  endpoint_out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2"' \
+    "$ROOT" "$state/$id.meta" "$id" 2>&1)
+  endpoint_status=$?
+  [ "$endpoint_status" -ne 0 ] || fail "terminal-only recovery metadata should not validate as a live endpoint"
+  assert_contains "$endpoint_out" "cleanup-only" "terminal-only recovery refusal should name its restricted scope"
+  orca_case pathless-terminal-recovery
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  teardown_out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  teardown_status=$?
+  expect_code 0 "$teardown_status" "terminal-only pathless recovery teardown should succeed"$'\n'"$teardown_out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"$terminal_id"$'\x1f''--json' \
+    "terminal-only recovery should close the exact recorded synthetic terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "terminal-only recovery must not remove an already released worktree"
+  assert_absent "$state/$id.meta" "successful terminal-only recovery should retire task metadata"
+  pass "fm-spawn.sh --backend orca: preserves a pathless terminal after close failure"
+}
+
 test_spawn_writes_orca_metadata_and_launches_harness() {
   local proj wt data state config id out log
   id="orcaspawnz1"
@@ -2036,6 +2105,7 @@ test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
+test_spawn_preserves_pathless_terminal_when_close_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_existing_task_metadata_before_orca_allocation
 test_spawn_refuses_orca_secondmate_before_home_mutation

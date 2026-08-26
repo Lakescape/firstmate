@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -105,11 +105,11 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is an opaque raw launch command. Raw launches remain disabled while
-#   OMP is dormant because aliases, renamed binaries, and wrapper scripts cannot be
-#   bound to a verified adapter identity. New adapters must first receive a named,
-#   owned launch template.
+#   overrides it for this spawn (either kind). Only named adapters are supported.
+#   A non-flag string containing whitespace is an opaque raw launch command and is
+#   refused before mutation because aliases, renamed binaries, and wrapper scripts
+#   cannot be bound to a verified adapter identity. New adapters must first receive
+#   a named, owned launch template.
 #   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
@@ -119,9 +119,9 @@
 #   config/secondmate-harness may also carry an optional model and effort as extra
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
-#   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
-#   defaults unless the caller also passes explicit --model/--effort flags. When
+#   harness from config/secondmate-harness. An explicit per-spawn --harness or
+#   positional harness arg starts with clean model/effort defaults unless the
+#   caller also passes explicit --model/--effort flags. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
@@ -736,72 +736,23 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_IS_BATCH" -eq 0 ]; then
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
-# Validate the raw launch as one literal argv-shaped command, then return the
-# basename it claims. This deliberately does not emulate a shell parser: quoting,
-# expansion, redirection, globbing, and compound expressions are refused before
-# mutation. Every literal word is checked for omp before assignment/env prefix
-# handling, so wrappers such as `command omp` cannot disguise the candidate.
-spawn_raw_launch_identity() {
-  local raw=$1 word base env_mode=0 skip_env_arg=0
+# Classify whether a refused raw launch has one simple literal argv shape.
+spawn_raw_launch_shape_valid() {
+  local raw=$1
   local safe_shape='^[A-Za-z0-9_./:@%+=,-]+( [A-Za-z0-9_./:@%+=,-]+)*$'
   [[ $raw =~ $safe_shape ]] || return 1
-
-  # Unquoted splitting is safe only after safe_shape has excluded every shell
-  # syntax character and every whitespace byte except the literal separator.
-  # Reject omp in any argv position before interpreting harmless prefixes.
-  # shellcheck disable=SC2086
-  for word in $raw; do
-    base=${word##*/}
-    if [ "$base" = omp ]; then
-      printf '%s\n' omp
-      return 0
-    fi
-  done
-
-  # Unquoted split matches the raw-launch branch. This is an identity check,
-  # not a shell parser; validation above makes the shell's input one simple
-  # literal command while this recognizes ordinary assignment/env prefixes.
-  # shellcheck disable=SC2086
-  for word in $raw; do
-    if [ "$skip_env_arg" -eq 1 ]; then
-      skip_env_arg=0
-      continue
-    fi
-    if [ "$env_mode" -eq 1 ]; then
-      case "$word" in
-        --) env_mode=2; continue ;;
-        -u|--unset|-C|--chdir|-S|--split-string) skip_env_arg=1; continue ;;
-        -S?*|--split-string=*) return 1 ;;
-        --unset=*|--chdir=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
-        -*) continue ;;
-        [A-Za-z_]*=*) continue ;;
-      esac
-      basename "$word"
-      return 0
-    fi
-    case "$word" in
-      [A-Za-z_]*=*) continue ;;
-      *)
-        base=$(basename "$word")
-        if [ "$base" = env ]; then
-          env_mode=1
-          continue
-        fi
-        printf '%s\n' "$base"
-        return 0
-        ;;
-    esac
-  done
-  return 1
+  case " $raw " in
+    *' -S'*|*' --split-string'*) return 1 ;;
+  esac
 }
 
 case "$ARG3" in
-  *' '*)
-    if ! spawn_raw_launch_identity "$ARG3" >/dev/null; then
+  *[[:space:]]*)
+    if ! spawn_raw_launch_shape_valid "$ARG3"; then
       echo "error: raw launch command must be one literal command with space-delimited words; shell quoting, expansion, redirection, globbing, compound expressions, and nested argument parsing are refused" >&2
       exit 1
     fi
-    echo "error: opaque raw launch commands are disabled while omp is dormant because their execution identity cannot be verified; select a named adapter with --harness" >&2
+    echo "error: opaque raw launch commands are disabled because their execution identity cannot be verified; select a named adapter with --harness" >&2
     exit 1
     ;;
 esac
@@ -912,14 +863,14 @@ spawn_selection_is_omp() {
 # metadata, or extension mutation. The gate recognizes explicit, positional,
 # configured, recorded, and batch selections.
 if spawn_selection_is_omp; then
-  # A secondmate selection is refused first and unconditionally - its model is
-  # never even consulted, because the refusal is on adapter identity alone.
-  if [ "$SPAWN_EFFECTIVE_KIND" = secondmate ]; then
-    refuse_omp_secondmate
+  if [ "$SPAWN_SELECTION_MODE" != explicit ]; then
+    echo "error: every omp spawn and relaunch requires an explicit --harness omp selection; positional, configured, and recorded omp selections are not allowed" >&2
     exit 1
   fi
-  if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_SELECTION_MODE" != explicit ]; then
-    echo "error: omp is reachable only through an explicit --harness omp selection; positional and configured omp launches are not allowed" >&2
+  # An explicitly selected secondmate is refused on adapter identity alone; its
+  # model is never consulted because OMP has no primary supervision protocol.
+  if [ "$SPAWN_EFFECTIVE_KIND" = secondmate ]; then
+    refuse_omp_secondmate
     exit 1
   fi
   require_omp_launch_model || exit 1
@@ -1389,9 +1340,9 @@ spawn_herdr_presentation_order_lock_acquire() {
 
 clear_relaunch_harness_wiring() {
   local harness=$1 wt=$2 state=$3 id=$4 token_path token auth_path path
-  # The wiring arms above match on harness PREFIXES, because a task launched
-  # from a raw command records that command's basename rather than the exact
-  # adapter name. The retirement tables are keyed by the exact adapter, so the
+  # The wiring arms above match on harness PREFIXES, because a legacy raw-launch
+  # task may record a command basename rather than the exact adapter name. The
+  # retirement tables are keyed by the exact adapter, so the
   # recorded value is resolved to its adapter first; otherwise a task recorded
   # as, say, `grok-2` would have wiring armed and never retired. An
   # unrecognized value resolves to no adapter, which is also the case in which
@@ -1761,8 +1712,8 @@ launch_template() {
     # fails closed until an exact importable session-free consumer proves the
     # effective configuration and constructed tool registry.
     # __OMPAGENTDIR__ and __OMPCWD__ select empty per-launch settings roots;
-    # PI_CONFIG_FILES is cleared and the actual worktree is admitted only by
-    # --add-dir. __OMPMODEL__ appears exactly once and always renders because
+    # PI_CONFIG_FILES is cleared and no task worktree or other directory is
+    # granted. __OMPMODEL__ appears exactly once and always renders because
     # require_omp_launch_model above refuses unless this exact launch was given
     # a fully qualified provider/model, so omp never selects a provider for itself. No
     # __EFFORTFLAG__: the effort axis stays outside this adapter until the live
@@ -2672,7 +2623,8 @@ EOF
     set -e
     if [ "$ORCA_WT_STATUS" -ne 0 ]; then
       if [ "$ORCA_WT_STATUS" -eq 2 ] && [ -n "$ORCA_WT_RAW" ]; then
-        if parse_orca_worktree_result "$ORCA_WT_RAW" && [ -n "$ORCA_WORKTREE_ID" ]; then
+        if parse_orca_worktree_result "$ORCA_WT_RAW" \
+           && { [ -n "$ORCA_WORKTREE_ID" ] || [ -n "$ORCA_TERMINAL" ]; }; then
           ORCA_ABORT_CLEANUP=1
         fi
       fi
@@ -3409,8 +3361,7 @@ if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
 
-[ "$SPAWN_SELECTION_MODE" != raw ] \
-  && [ "$HARNESS" = "$SPAWN_EFFECTIVE_HARNESS" ] || {
+[ "$HARNESS" = "$SPAWN_EFFECTIVE_HARNESS" ] || {
   echo "error: launch selection no longer matches the frozen verified adapter identity; refusing submission" >&2
   exit 1
 }

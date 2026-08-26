@@ -410,9 +410,9 @@ test_active_dispatch_profile_refuses_raw_launch_command() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "custom-agent --flag")
   status=$?
-  expect_code 1 "$status" "raw launch command should remain disabled while OMP is dormant"
-  assert_contains "$out" "opaque raw launch commands are disabled while omp is dormant" \
-    "raw launch refusal did not name the dormant identity boundary"
+  expect_code 1 "$status" "raw launch command should remain disabled"
+  assert_contains "$out" "opaque raw launch commands are disabled because their execution identity cannot be verified" \
+    "raw launch refusal did not name the permanent identity boundary"
   assert_absent "$HOME_DIR/state/$id.meta" "raw launch refusal published task metadata"
   [ ! -s "$LAUNCH_LOG" ] || fail "raw launch refusal submitted a backend command"
   pass "active crew-dispatch profile does not authorize an opaque raw launch"

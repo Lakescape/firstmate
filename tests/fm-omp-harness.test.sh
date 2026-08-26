@@ -491,7 +491,7 @@ test_omp_version_probe_is_hard_bounded() {
 test_omp_launch_request_is_rendered() {
   local manifest template
   manifest=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
-    /isolated/agent /isolated/cwd /task/worktree /opt/omp "$OMP_MODEL" /state/task.omp-ext.ts) \
+    /isolated/agent /isolated/cwd /opt/omp "$OMP_MODEL" /state/task.omp-ext.ts) \
     || fail "candidate OMP manifest did not render"
   template=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" launch-template) \
     || fail "candidate OMP launch template did not render"
@@ -504,8 +504,8 @@ const expectedUnset = [
   "FM_PI_HARNESS", "CURSOR_AGENT", "CURSOR_INVOKED_AS", "TRACEPARENT",
 ];
 const expectedArgv = [
-  "/opt/omp", "--cwd", "/isolated/cwd", "--add-dir", "/task/worktree",
-  "--approval-mode", "yolo", "--no-title", "--no-extensions", "--no-skills",
+  "/opt/omp", "--cwd", "/isolated/cwd", "--approval-mode", "yolo",
+  "--no-title", "--no-extensions", "--no-skills",
   "--no-lsp", "--no-tools", "--model", "anthropic/claude-sonnet-4-5",
   "-e", "/state/task.omp-ext.ts",
 ];
@@ -515,13 +515,14 @@ if (manifest.environment.PI_CODING_AGENT_DIR !== "/isolated/agent") process.exit
 if (JSON.stringify(manifest.argv) !== JSON.stringify(expectedArgv)) process.exit(1);
 if (manifest.argv.includes("--tools")) process.exit(1);
 if (!manifest.argv.includes("--no-tools")) process.exit(1);
+if (manifest.argv.includes("--add-dir")) process.exit(1);
+if (manifest.argv.includes("/task/worktree")) process.exit(1);
 const templateManifest = {
   ...manifest,
   environment: { FM_OMP_HARNESS: "1", PI_CODING_AGENT_DIR: "__OMPAGENTDIR__" },
   argv: manifest.argv.map((word) => ({
     "/opt/omp": "__OMPBIN__",
     "/isolated/cwd": "__OMPCWD__",
-    "/task/worktree": "__WORKTREE__",
     "anthropic/claude-sonnet-4-5": "__OMPMODEL__",
     "/state/task.omp-ext.ts": "__OMPEXT__",
   })[word] || word),
@@ -596,7 +597,7 @@ test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation()
   "$ROOT/bin/fm-omp-candidate-artifacts.sh" prepare "$agent_dir" "$isolated_cwd" \
     || fail "could not prepare isolated candidate OMP settings"
   manifest=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
-    "$agent_dir" "$isolated_cwd" /task/worktree /opt/omp "$OMP_MODEL" "$ext") \
+    "$agent_dir" "$isolated_cwd" /opt/omp "$OMP_MODEL" "$ext") \
     || fail "could not render the candidate OMP manifest"
   MANIFEST=$manifest AGENT_DIR=$agent_dir ISOLATED_CWD=$isolated_cwd \
     AMBIENT_AGENT=$ambient_agent AMBIENT_PROJECT=$ambient_project \
@@ -613,6 +614,7 @@ const cwdIndex = manifest.argv.indexOf("--cwd");
 const cwd = manifest.argv[cwdIndex + 1];
 if (cwd === process.env.AMBIENT_PROJECT) process.exit(1);
 if (cwd !== process.env.ISOLATED_CWD) process.exit(1);
+if (manifest.argv.includes("--add-dir") || manifest.argv.includes("/task/worktree")) process.exit(1);
 if (!manifest.argv.includes("--no-lsp")) process.exit(1);
 const config = JSON.parse(fs.readFileSync(path.join(manifest.environment.PI_CODING_AGENT_DIR, "config.yml"), "utf8"));
 const retry = config.retry;
@@ -817,8 +819,8 @@ test_omp_selection_policy_matrix() {
   local rec out status guard_marker sub_home launch tmux_log rows=0 enforced=0
   local want_model="omp requires an explicit --model"
   local want_second="omp is a candidate crewmate/scout adapter only"
-  local want_explicit="omp is reachable only through an explicit --harness omp selection"
-  local want_raw="opaque raw launch commands are disabled while omp is dormant"
+  local want_explicit="every omp spawn and relaunch requires an explicit --harness omp selection"
+  local want_raw="opaque raw launch commands are disabled because their execution identity cannot be verified"
 
   # Row 1: an explicit --harness omp with no model.
   rec=$(make_omp_case omp-sel-explicit claude omp-s1)
@@ -939,7 +941,7 @@ test_omp_selection_policy_matrix() {
   assert_not_contains "$launch" "--provider" "a non-omp launch must never carry a provider flag"
   enforced=$((enforced + 1))
 
-  # Row 9: a raw launch command must not bypass the canonical adapter template.
+  # Row 9: an opaque raw launch command must not bypass the named adapter boundary.
   rec=$(make_omp_case omp-sel-raw claude omp-s9)
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
@@ -948,7 +950,7 @@ test_omp_selection_policy_matrix() {
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
     omp-s9 "$PROJ_DIR" "omp --approval-mode yolo" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "a raw launch that names omp must be refused: $out"
+  [ "$status" -ne 0 ] || fail "an opaque raw launch must be refused: $out"
   assert_contains "$out" "$want_raw" "raw omp shape: $out"
   assert_not_contains "$out" "another spawn is already creating" "raw omp shape reached the task lock: $out"
   assert_absent "$guard_marker" "raw omp shape was refused after the watcher guard wrote state"
@@ -958,7 +960,7 @@ test_omp_selection_policy_matrix() {
   rm -rf "$HOME_DIR/state/.spawn-omp-s9.lock"
   enforced=$((enforced + 1))
 
-  # Row 10: an env-wrapped raw launch is still identified as omp and refused.
+  # Row 10: an env-wrapped raw launch has no verifiable adapter identity and is refused.
   rec=$(make_omp_case omp-sel-raw-env claude omp-s10)
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
@@ -968,7 +970,7 @@ test_omp_selection_policy_matrix() {
     omp-s10 "$PROJ_DIR" "env -u TRACEPARENT FM_TEST=1 omp --approval-mode yolo" \
     --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   status=$?
-  [ "$status" -ne 0 ] || fail "an env-wrapped raw launch that names omp must be refused: $out"
+  [ "$status" -ne 0 ] || fail "an env-wrapped raw launch must be refused: $out"
   assert_contains "$out" "$want_raw" "env-wrapped raw omp shape: $out"
   assert_not_contains "$out" "another spawn is already creating" "env-wrapped raw omp shape reached the task lock: $out"
   assert_absent "$guard_marker" "env-wrapped raw omp shape was refused after the watcher guard wrote state"
@@ -1007,8 +1009,8 @@ test_omp_selection_policy_matrix() {
   rm -rf "$HOME_DIR/state/.spawn-omp-s11.lock"
   enforced=$((enforced + 1))
 
-  # Rows 12-15: shell wrappers, compound expressions, and a nested env argv
-  # parser cannot disguise OMP.
+  # Rows 12-15: shell wrappers, compound expressions, and nested argv parsing
+  # remain opaque and are refused without inferring an executable identity.
   # The public spawn command must refuse each form before the watcher guard,
   # task lock, metadata publication, or backend submission.
   rows=$((rows + 1))
@@ -1050,7 +1052,7 @@ test_opaque_raw_indirection_is_refused() {
   local tools sentinel want case_name id raw target
   tools="$TMP_ROOT/raw-indirection-tools"
   sentinel="$tools/executed"
-  want="opaque raw launch commands are disabled while omp is dormant"
+  want="opaque raw launch commands are disabled because their execution identity cannot be verified"
   mkdir -p "$tools"
   target="$tools/omp-target"
   cat > "$target" <<SH
@@ -1080,7 +1082,10 @@ SH
     assert_raw_launch_refused_before_mutation "omp-raw-$case_name" "$id" "$raw" "$want"
     assert_absent "$sentinel" "$case_name raw indirection executed before refusal"
   done
-  pass "opaque raw symlink, wrapper, and renamed executable identities are refused"
+  assert_raw_launch_refused_before_mutation \
+    omp-raw-tabbed omp-raw-tabbed $'someunverifiedagent\t--flag' \
+    "raw launch command must be one literal command"
+  pass "opaque raw symlink, wrapper, and renamed executable commands are refused before execution"
 }
 
 # --- relaunch ---------------------------------------------------------------
@@ -1329,24 +1334,37 @@ test_valid_nonomp_relaunch_passes_the_preflight() {
 }
 
 test_omp_relaunch_still_requires_the_model() {
-  local rec id=omp-relaunch out status meta guard_marker
-  # A --relaunch adopts its harness from the task's own record. Its read-only,
-  # regular-file preflight applies the model/backend gates before every lock;
-  # the full locked endpoint validation below remains authoritative.
-  # It must still refuse: a relaunch carries no recorded model forward, and omp
-  # would otherwise resolve the provider itself.
+  local rec id=omp-relaunch out status meta guard_marker omp_log
   rec=$(make_omp_case omp-relaunch claude "$id")
   read_case_record "$rec"
   meta="$HOME_DIR/state/$id.meta"
+  omp_log="$CASE_DIR/omp-relaunch-invocations"
+  : > "$omp_log"
   fm_write_meta "$meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off"
+  out=$(FM_FAKE_WINDOW="fm-$id" FM_FAKE_COMMAND=zsh FM_OMP_STUB_LOG="$omp_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch --model "$OMP_MODEL")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an implicit relaunch of an omp task must be refused: $out"
+  assert_contains "$out" "every omp spawn and relaunch requires an explicit --harness omp" \
+    "the implicit relaunch refusal did not require caller-explicit selection: $out"
+  [ ! -s "$omp_log" ] || fail "an implicit OMP relaunch reached the candidate executable probe"
+  assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "an implicit refused relaunch wrote the extension"
+
   out=$(FM_FAKE_WINDOW="fm-$id" FM_FAKE_COMMAND=zsh \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch)
   status=$?
   [ "$status" -ne 0 ] || fail "a relaunch of an omp task with no model must be refused: $out"
+  assert_contains "$out" "every omp spawn and relaunch requires an explicit --harness omp" \
+    "a relaunch without caller-explicit OMP selection reached the model gate: $out"
+
+  out=$(FM_FAKE_WINDOW="fm-$id" FM_FAKE_COMMAND=zsh \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch --harness omp)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an explicit relaunch of an omp task with no model must be refused: $out"
   assert_contains "$out" "omp requires an explicit --model" \
-    "the relaunch refusal did not name the launch pin: $out"
+    "the explicit relaunch refusal did not name the launch pin: $out"
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "a refused relaunch must not write the extension"
 
   # Supplying the model must not make a legacy non-Orca record launchable.
@@ -1355,7 +1373,7 @@ test_omp_relaunch_still_requires_the_model() {
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
   arm_ordering_probes "$id"
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" --relaunch --model "$OMP_MODEL")
+    "$id" --relaunch --harness omp --model "$OMP_MODEL")
   status=$?
   [ "$status" -ne 0 ] || fail "a relaunch of an OMP task recorded on tmux must be refused: $out"
   assert_contains "$out" "omp requires backend=orca" "the relaunch refusal did not enforce Orca: $out"
@@ -1370,14 +1388,14 @@ test_omp_relaunch_still_requires_the_model() {
     "orca_worktree_id=wt-$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=omp" "kind=ship" "mode=no-mistakes" "yolo=off" "backend=orca"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" --relaunch --model "$OMP_MODEL")
+    "$id" --relaunch --harness omp --model "$OMP_MODEL")
   status=$?
   [ "$status" -ne 0 ] || fail "an OMP relaunch must retain its recovery-grade endpoint gate: $out"
   assert_contains "$out" "session-free omp/17.2.9 consumer" \
     "a valid OMP record did not stop at both mandatory gates: $out"
   assert_not_contains "$out" "regular, non-symlink metadata" \
     "a valid OMP record was incorrectly rejected by the new metadata preflight: $out"
-  pass "an OMP relaunch requires qualified metadata and remains dormant"
+  pass "an OMP relaunch requires explicit selection and remains dormant"
 }
 
 # --- busy-state trust table ------------------------------------------------

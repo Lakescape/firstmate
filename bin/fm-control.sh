@@ -38,8 +38,8 @@
 #              durable config/secondmate-harness pin (harness plus its optional
 #              model and effort tokens) exactly as any other respawn does, while
 #              a ship or scout keeps the exact adapter already recorded for it.
-#              A prefixed raw-command basename cannot reconstruct its launch
-#              command, so relaunch requires an explicit --harness for it.
+#              A legacy recorded raw-command basename cannot reconstruct its
+#              launch command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -606,6 +606,43 @@ relaunch_rollback() {
   return 0
 }
 
+load_secondmate_relaunch_snapshot() {
+  local snapshot line key value
+  local harness= model= effort= harness_seen=0 model_seen=0 effort_seen=0
+  snapshot=$("$SCRIPT_DIR/fm-harness.sh" secondmate-snapshot 2>/dev/null) || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) return 1 ;;
+    esac
+    case "$key" in
+      harness)
+        [ "$harness_seen" -eq 0 ] || return 1
+        harness=$value
+        harness_seen=1
+        ;;
+      model)
+        [ "$model_seen" -eq 0 ] || return 1
+        model=$value
+        model_seen=1
+        ;;
+      effort)
+        [ "$effort_seen" -eq 0 ] || return 1
+        effort=$value
+        effort_seen=1
+        ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$snapshot
+EOF
+  [ "$harness_seen" -eq 1 ] && [ "$model_seen" -eq 1 ] \
+    && [ "$effort_seen" -eq 1 ] && [ -n "$harness" ] || return 1
+  CONFIG_HARNESS=$harness
+  CONFIG_MODEL=$model
+  CONFIG_EFFORT=$effort
+}
+
 resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
@@ -620,17 +657,16 @@ resolve_relaunch_profile() {
   CONFIG_HARNESS=
   CONFIG_MODEL=
   CONFIG_EFFORT=
-  if [ "$KIND" = secondmate ]; then
+  if [ "$KIND" = secondmate ] && [ "$HARNESS_SET" = 0 ]; then
     # A secondmate's harness, model, and effort are a durable configured pin
-    # that every respawn re-resolves (the secondmate-provisioning contract), so
-    # a relaunch with no explicit harness picks up a newly configured one
-    # instead of freezing whatever this incarnation happens to run. Crewmates
-    # and scouts deliberately do NOT resolve config here: their harness comes
-    # from firstmate's own dispatch-profile judgment at intake, and silently
-    # re-resolving it would bypass that consultation.
-    CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
-    CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
-    CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+    # that every ambient respawn re-resolves (the secondmate-provisioning
+    # contract), so a relaunch with no explicit harness picks up a newly
+    # configured one instead of freezing whatever this incarnation happens to
+    # run. Crewmates and scouts deliberately do NOT resolve config here: their
+    # harness comes from firstmate's own dispatch-profile judgment at intake,
+    # and silently re-resolving it would bypass that consultation.
+    load_secondmate_relaunch_snapshot \
+      || die "could not resolve one complete secondmate harness snapshot before relaunch"
     case "$CONFIG_EFFORT" in
       ''|low|medium|high|xhigh|max) ;;
       *)
@@ -640,15 +676,21 @@ resolve_relaunch_profile() {
     esac
   fi
   if [ "$HARNESS_SET" = 1 ]; then
-    fm_control_harness_supported "$NEW_HARNESS" \
-      || die "'$NEW_HARNESS' is not a verified harness; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$NEW_HARNESS
   elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
-    fm_control_harness_supported "$CONFIG_HARNESS" \
-      || die "the configured secondmate harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
     TARGET_HARNESS=$CONFIG_HARNESS
   else
     TARGET_HARNESS=$PRIOR_HARNESS
+  fi
+  if [ "$TARGET_HARNESS" = omp ] && [ "$HARNESS_SET" = 0 ]; then
+    die "omp relaunch requires an explicit --harness omp selection from the caller; recorded and configured omp selections are not allowed"
+  fi
+  if [ "$HARNESS_SET" = 1 ]; then
+    fm_control_harness_supported "$NEW_HARNESS" \
+      || die "'$NEW_HARNESS' is not a verified harness; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
+  elif [ -n "$CONFIG_HARNESS" ]; then
+    fm_control_harness_supported "$CONFIG_HARNESS" \
+      || die "the configured secondmate harness '$CONFIG_HARNESS' is not verified; fm-control refuses to relaunch onto an adapter with no verified control or launch mechanics"
   fi
   # The launch owner refuses an adapter that cannot run this task's kind, but it
   # is only reached after the old agent has been stopped. Asking the same

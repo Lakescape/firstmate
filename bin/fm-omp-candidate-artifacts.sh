@@ -2,7 +2,7 @@
 # Render the dormant OMP candidate's isolated settings and launch artifacts.
 # Usage:
 #   fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd>
-#   fm-omp-candidate-artifacts.sh manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension>
+#   fm-omp-candidate-artifacts.sh manifest <agent-dir> <cwd> <binary> <model> <extension>
 #   fm-omp-candidate-artifacts.sh launch-template
 #   fm-omp-candidate-artifacts.sh validate-submission <text>
 #   fm-omp-candidate-artifacts.sh extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>
@@ -21,7 +21,7 @@ OMP_RETRY_JSON='{"modelFallback":false,"usageAwareFallback":false,"fallbackChain
 OMP_AST_EDIT_JSON='{"enabled":false}'
 
 usage() {
-  echo "usage: fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd> | manifest <agent-dir> <cwd> <worktree> <binary> <model> <extension> | launch-template | validate-submission <text> | extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>" >&2
+  echo "usage: fm-omp-candidate-artifacts.sh prepare <agent-dir> <cwd> | manifest <agent-dir> <cwd> <binary> <model> <extension> | launch-template | validate-submission <text> | extension <output> <busy-event> <state> <task-id> <generation> <turn-ended>" >&2
   exit 2
 }
 
@@ -58,9 +58,9 @@ prepare_isolated_settings() {
 }
 
 render_manifest() {
-  local agent_dir=$1 cwd=$2 worktree=$3 binary=$4 model=$5 extension=$6
-  OMP_AGENT_DIR=$agent_dir OMP_CWD=$cwd OMP_WORKTREE=$worktree \
-    OMP_BINARY=$binary OMP_MODEL=$model OMP_EXTENSION=$extension node <<'NODE'
+  local agent_dir=$1 cwd=$2 binary=$3 model=$4 extension=$5
+  OMP_AGENT_DIR=$agent_dir OMP_CWD=$cwd OMP_BINARY=$binary \
+    OMP_MODEL=$model OMP_EXTENSION=$extension node <<'NODE'
 const manifest = {
   unsetEnvironment: [
     "CLAUDECODE", "PI_CODING_AGENT", "PI_CONFIG_FILES", "OMP_PROFILE", "PI_PROFILE", "GROK_AGENT",
@@ -73,7 +73,6 @@ const manifest = {
   argv: [
     process.env.OMP_BINARY,
     "--cwd", process.env.OMP_CWD,
-    "--add-dir", process.env.OMP_WORKTREE,
     "--approval-mode", "yolo",
     "--no-title",
     "--no-extensions",
@@ -89,7 +88,7 @@ NODE
 }
 
 render_launch_template() {
-  render_manifest __OMPAGENTDIR__ __OMPCWD__ __WORKTREE__ __OMPBIN__ __OMPMODEL__ __OMPEXT__ \
+  render_manifest __OMPAGENTDIR__ __OMPCWD__ __OMPBIN__ __OMPMODEL__ __OMPEXT__ \
     | node -e '
 const fs = require("node:fs");
 const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -160,8 +159,8 @@ case "${1:-}" in
     prepare_isolated_settings "$2" "$3"
     ;;
   manifest)
-    [ "$#" -eq 7 ] || usage
-    render_manifest "$2" "$3" "$4" "$5" "$6" "$7"
+    [ "$#" -eq 6 ] || usage
+    render_manifest "$2" "$3" "$4" "$5" "$6"
     ;;
   launch-template)
     [ "$#" -eq 1 ] || usage

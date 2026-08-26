@@ -171,6 +171,8 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_PREPARE="${FM_FAKE_TRACE_PREPARE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_HARNESS_SNAPSHOT_LOG="${FM_HARNESS_SNAPSHOT_LOG:-}" \
+    FM_REAL_HARNESS="${FM_REAL_HARNESS:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -642,6 +644,116 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
 
+test_secondmate_relaunch_freezes_one_configured_profile_snapshot() {
+  local dir home out rc control_root harness_log original_control path
+  dir=$(new_case smsnapshot sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf 'claude stale-model low\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  control_root="$dir/control-root"
+  harness_log="$dir/fake/harness-modes"
+  mkdir -p "$control_root/bin"
+  for path in "$ROOT"/bin/*; do
+    ln -s "$path" "$control_root/bin/${path##*/}"
+  done
+  rm "$control_root/bin/fm-harness.sh"
+  cat > "$control_root/bin/fm-harness.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-own}" >> "$FM_HARNESS_SNAPSHOT_LOG"
+case "${1:-}" in
+  secondmate-snapshot)
+    printf 'harness=codex\nmodel=snapshot-model\neffort=high\n'
+    ;;
+  secondmate) printf 'claude\n' ;;
+  secondmate-model) printf 'mixed-model\n' ;;
+  secondmate-effort) printf 'low\n' ;;
+  *) exec "$FM_REAL_HARNESS" "$@" ;;
+esac
+SH
+  chmod +x "$control_root/bin/fm-harness.sh"
+  original_control=$CONTROL
+  CONTROL="$control_root/bin/fm-control.sh"
+  out=$(FM_HARNESS_SNAPSHOT_LOG="$harness_log" FM_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
+    run_control "$dir" sm8 relaunch); rc=$?
+  CONTROL=$original_control
+  expect_code 0 "$rc" "a complete secondmate profile snapshot should relaunch"$'\n'"$out"
+  [ "$(cat "$harness_log")" = secondmate-snapshot ] \
+    || fail "relaunch must resolve the configured profile once, got modes: $(cat "$harness_log")"
+  [ "$(journal_field "$dir" sm8 to_harness)" = codex ] \
+    || fail "the frozen snapshot harness was not used"
+  [ "$(journal_field "$dir" sm8 to_model)" = snapshot-model ] \
+    || fail "the frozen snapshot model was not used"
+  [ "$(journal_field "$dir" sm8 to_effort)" = high ] \
+    || fail "the frozen snapshot effort was not used"
+  pass "fm-control relaunch: secondmate profile axes come from one immutable snapshot"
+}
+
+test_secondmate_relaunch_refuses_implicit_configured_omp_before_stop() {
+  local dir home out rc
+  dir=$(new_case smompimplicit sm9)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm9"
+  printf 'omp anthropic/synthetic-model high\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm9/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm9\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm9"
+    echo "endpoint_task_id=sm9"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm9.meta"
+  printf '%s\n' "fm-sm9" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  out=$(run_control "$dir" sm9 relaunch); rc=$?
+  expect_code 1 "$rc" "configured OMP must not implicitly select a relaunch"
+  assert_contains "$out" "omp relaunch requires an explicit --harness omp selection from the caller" \
+    "the configured OMP refusal should preserve caller-origin selection authority"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "implicit configured OMP must refuse before stopping the running agent"
+  [ "$(meta_field "$dir" sm9 harness)" = claude ] \
+    || fail "implicit configured OMP must leave the durable record unchanged"
+  assert_absent "$home/state/sm9.control-relaunch" \
+    "implicit configured OMP must refuse before the relaunch checkpoint"
+  out=$(run_control "$dir" sm9 relaunch --harness omp); rc=$?
+  expect_code 1 "$rc" "explicit OMP control must remain dormant pending ATX-2170"
+  assert_contains "$out" "not a verified harness" \
+    "explicit OMP control should remain behind the independent lifecycle gate"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "dormant explicit OMP control must refuse before stopping the running agent"
+  pass "fm-control relaunch: ambient OMP is refused and explicit OMP remains dormant"
+}
+
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   local dir home out rc
   dir=$(new_case invalid-effort sm6)
@@ -721,7 +833,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
 }
 
 test_explicit_secondmate_harness_ignores_configured_profile_axes() {
-  local dir home out rc
+  local dir home out rc control_root harness_log original_control path
   dir=$(new_case smexplicit sm4)
   home="$dir/home"
   mkdir -p "$home/config"
@@ -748,13 +860,37 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   printf '%s\n' "fm-sm4" > "$dir/fake/windows"
   printf '%s' "$dir/smhome" > "$dir/fake/cwd"
   printf 'codex' > "$dir/fake/becomes"
-  out=$(run_control "$dir" sm4 relaunch --harness codex); rc=$?
+  control_root="$dir/control-root"
+  harness_log="$dir/fake/harness-modes"
+  mkdir -p "$control_root/bin"
+  for path in "$ROOT"/bin/*; do
+    ln -s "$path" "$control_root/bin/${path##*/}"
+  done
+  rm "$control_root/bin/fm-harness.sh"
+  cat > "$control_root/bin/fm-harness.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  secondmate-snapshot)
+    printf '%s\n' "$1" >> "$FM_HARNESS_SNAPSHOT_LOG"
+    exit 73
+    ;;
+  *) exec "$FM_REAL_HARNESS" "$@" ;;
+esac
+SH
+  chmod +x "$control_root/bin/fm-harness.sh"
+  original_control=$CONTROL
+  CONTROL="$control_root/bin/fm-control.sh"
+  out=$(FM_HARNESS_SNAPSHOT_LOG="$harness_log" FM_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
+    run_control "$dir" sm4 relaunch --harness codex); rc=$?
+  CONTROL=$original_control
   expect_code 0 "$rc" "an explicit secondmate harness should relaunch"$'\n'"$out"
+  [ ! -e "$harness_log" ] \
+    || fail "an explicit secondmate harness must not resolve the configured snapshot"
   [ "$(meta_field "$dir" sm4 model)" = default ] \
     || fail "an explicit secondmate harness must not inherit the configured model"
   [ "$(meta_field "$dir" sm4 effort)" = default ] \
     || fail "an explicit secondmate harness must not inherit the configured effort"
-  pass "fm-control relaunch: explicit secondmate harness resets unnamed profile axes"
+  pass "fm-control relaunch: explicit secondmate harness bypasses configured profile resolution"
 }
 
 test_ship_relaunch_ignores_the_crew_harness_config() {
@@ -771,7 +907,7 @@ test_ship_relaunch_ignores_the_crew_harness_config() {
   pass "fm-control relaunch: a ship task keeps its recorded harness instead of re-reading crew config"
 }
 
-test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
+test_non_omp_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   local dir out
   dir=$(new_case spawnharness rl21)
   add_ship_task "$dir" rl21 claude
@@ -782,12 +918,12 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   [ "$(meta_field "$dir" rl21 harness)" = claude ] \
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
-  pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
+  pass "fm-spawn --relaunch: a non-OMP relaunch reuses its recorded harness, never the crew default"
 }
 
-# fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
-# from a raw command records that command's basename rather than the exact
-# adapter name. Retirement must resolve the same way, or a task recorded as
+# fm-spawn arms per-task wiring on harness PREFIXES because a legacy raw-launch
+# task may record a command basename rather than the exact adapter name.
+# Retirement must resolve the same way, or a task recorded as
 # `grok-2` would have its turn-end token and hook pointer armed and never
 # retired - leaving a registry entry that outlives the agent that owned it.
 test_prefixed_prior_harness_wiring_is_still_retired() {
@@ -1329,11 +1465,13 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_relaunch_freezes_one_configured_profile_snapshot
+test_secondmate_relaunch_refuses_implicit_configured_omp_before_stop
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
-test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_non_omp_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch

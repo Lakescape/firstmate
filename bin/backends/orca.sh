@@ -179,8 +179,14 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   terminal=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-terminal-handle 2>/dev/null || true)
   wt_path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path) || {
     echo "error: orca worktree create did not return a path for $name" >&2
-    [ -z "$terminal" ] || fm_backend_orca_kill "$terminal" >/dev/null 2>&1 || true
-    if fm_backend_orca_remove_worktree "$wt_id" >/dev/null; then
+    if [ -n "$terminal" ] \
+       && fm_backend_orca_close_terminal "$terminal" >/dev/null 2>&1; then
+      terminal=
+    fi
+    if fm_backend_orca_remove_worktree "$wt_id" >/dev/null 2>&1; then
+      wt_id=
+    fi
+    if [ -z "$wt_id" ] && [ -z "$terminal" ]; then
       return 1
     fi
     if [ -n "$terminal" ]; then
