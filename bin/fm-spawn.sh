@@ -106,13 +106,10 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. A raw launch must be one literal, space-delimited command whose
-#   words contain no shell quoting, expansion, redirection, globbing, or compound
-#   operators. Any word that names omp, including one behind ordinary assignment,
-#   env, or command prefixes, is refused before mutation; OMP is candidate-only
-#   and requires the canonical --harness omp template. env split-string modes are
-#   also refused because they introduce a second command parser.
+#   whitespace is an opaque raw launch command. Raw launches remain disabled while
+#   OMP is dormant because aliases, renamed binaries, and wrapper scripts cannot be
+#   bound to a verified adapter identity. New adapters must first receive a named,
+#   owned launch template.
 #   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
@@ -501,7 +498,6 @@ resolve_omp_binary() {
       ;;
   esac
   reported=$(fm_run_timed "$FM_OMP_VERSION_PROBE_SECONDS" "$candidate" --version 2>/dev/null) || reported=
-  reported=$(printf '%s\n' "$reported" | head -n 1 | tr -d '[:space:]')
   if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
     echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
     return 1
@@ -799,51 +795,114 @@ spawn_raw_launch_identity() {
   return 1
 }
 
-RAW_LAUNCH_IDENTITY=
 case "$ARG3" in
   *' '*)
-    if ! RAW_LAUNCH_IDENTITY=$(spawn_raw_launch_identity "$ARG3"); then
+    if ! spawn_raw_launch_identity "$ARG3" >/dev/null; then
       echo "error: raw launch command must be one literal command with space-delimited words; shell quoting, expansion, redirection, globbing, compound expressions, and nested argument parsing are refused" >&2
       exit 1
     fi
+    echo "error: opaque raw launch commands are disabled while omp is dormant because their execution identity cannot be verified; select a named adapter with --harness" >&2
+    exit 1
     ;;
 esac
 
-# Does this invocation select omp? Read exactly the way the launch path resolves
-# the harness below - an explicit --harness, then the back-compat positional
-# argument, then this home's configured crew/secondmate harness - without copying
-# any adapter table. A raw launch command claims omp when its effective command
-# resolves to omp, so ordinary assignment and env wrappers cannot evade the
-# same guards.
+SPAWN_EFFECTIVE_HARNESS=
+SPAWN_EFFECTIVE_KIND=$KIND
+SPAWN_CONFIG_MODEL=
+SPAWN_CONFIG_EFFORT=
+SPAWN_HARNESS_SOURCE=
+SPAWN_SELECTION_MODE=
+SPAWN_DISPATCH_ACTIVE=0
+[ -f "$CONFIG/crew-dispatch.json" ] && SPAWN_DISPATCH_ACTIVE=1
+
+spawn_load_harness_snapshot() {
+  local mode=$1 snapshot line key value
+  local harness= model= effort= harness_seen=0 model_seen=0 effort_seen=0
+  snapshot=$("$FM_ROOT/bin/fm-harness.sh" "$mode-snapshot") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) return 1 ;;
+    esac
+    case "$key" in
+      harness)
+        [ "$harness_seen" -eq 0 ] || return 1
+        harness=$value
+        harness_seen=1
+        ;;
+      model)
+        [ "$model_seen" -eq 0 ] || return 1
+        model=$value
+        model_seen=1
+        ;;
+      effort)
+        [ "$effort_seen" -eq 0 ] || return 1
+        effort=$value
+        effort_seen=1
+        ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$snapshot
+EOF
+  [ "$harness_seen" -eq 1 ] && [ "$model_seen" -eq 1 ] \
+    && [ "$effort_seen" -eq 1 ] && [ -n "$harness" ] || return 1
+  SPAWN_EFFECTIVE_HARNESS=$harness
+  SPAWN_CONFIG_MODEL=$model
+  SPAWN_CONFIG_EFFORT=$effort
+}
+
+if [ "$RELAUNCH" -eq 1 ]; then
+  if [ -n "$HARNESS_ARG" ]; then
+    SPAWN_EFFECTIVE_HARNESS=$HARNESS_ARG
+    SPAWN_HARNESS_SOURCE='explicit --harness'
+    SPAWN_SELECTION_MODE=explicit
+  else
+    SPAWN_EFFECTIVE_HARNESS=$(relaunch_preflight_meta_get harness)
+    SPAWN_HARNESS_SOURCE='recorded task metadata'
+    SPAWN_SELECTION_MODE=recorded
+  fi
+  SPAWN_EFFECTIVE_KIND=$(relaunch_preflight_meta_get kind)
+  [ -n "$SPAWN_EFFECTIVE_KIND" ] || SPAWN_EFFECTIVE_KIND=ship
+elif [ -n "$ARG3" ]; then
+  SPAWN_EFFECTIVE_HARNESS=$ARG3
+  if [ -n "$HARNESS_ARG" ]; then
+    SPAWN_HARNESS_SOURCE='explicit --harness'
+    SPAWN_SELECTION_MODE=explicit
+  else
+    SPAWN_HARNESS_SOURCE='positional harness'
+    SPAWN_SELECTION_MODE=positional
+  fi
+elif [ "$KIND" = secondmate ]; then
+  if ! spawn_load_harness_snapshot secondmate; then
+    echo "error: could not resolve one complete secondmate harness snapshot" >&2
+    exit 1
+  fi
+  SPAWN_HARNESS_SOURCE='config/secondmate-harness (falling back to config/crew-harness)'
+  SPAWN_SELECTION_MODE=configured
+else
+  if [ "$SPAWN_DISPATCH_ACTIVE" -eq 1 ]; then
+    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    exit 1
+  fi
+  if ! spawn_load_harness_snapshot crew; then
+    echo "error: could not resolve one complete crew harness snapshot" >&2
+    exit 1
+  fi
+  SPAWN_HARNESS_SOURCE='config/crew-harness'
+  SPAWN_SELECTION_MODE=configured
+fi
+
+[ -n "$SPAWN_EFFECTIVE_HARNESS" ] || {
+  echo "error: no effective harness could be resolved before spawn" >&2
+  exit 1
+}
+readonly SPAWN_EFFECTIVE_HARNESS SPAWN_EFFECTIVE_KIND SPAWN_CONFIG_MODEL \
+  SPAWN_CONFIG_EFFORT SPAWN_HARNESS_SOURCE SPAWN_SELECTION_MODE \
+  SPAWN_DISPATCH_ACTIVE
+
 spawn_selection_is_omp() {
-  local configured=
-  local identity=
-  case "$ARG3" in
-    *' '*)
-      identity=$RAW_LAUNCH_IDENTITY
-      [ "$identity" = omp ]
-      return
-      ;;
-    omp) return 0 ;;
-    '') : ;;
-    *) return 1 ;;
-  esac
-  # A relaunch with no explicit harness adopts the recorded harness. The task's
-  # lifecycle and metadata locks bind this preflight snapshot before omp's
-  # model/backend gates; normal locked endpoint validation remains authoritative.
-  if [ "$RELAUNCH" -eq 1 ]; then
-    configured=$(relaunch_preflight_meta_get harness)
-    [ "$configured" = omp ]
-    return
-  fi
-  if [ "$KIND" = secondmate ]; then
-    configured=$("$FM_ROOT/bin/fm-harness.sh" secondmate 2>/dev/null || true)
-  elif [ ! -f "$CONFIG/crew-dispatch.json" ]; then
-    # With a dispatch profile active the launch path refuses an implicit harness
-    # instead of reading config/crew-harness, so neither does this.
-    configured=$("$FM_ROOT/bin/fm-harness.sh" crew 2>/dev/null || true)
-  fi
-  [ "$configured" = omp ]
+  [ "$SPAWN_EFFECTIVE_HARNESS" = omp ]
 }
 
 # Every omp refusal for a fresh spawn lands here before the watcher guard, batch
@@ -851,16 +910,16 @@ spawn_selection_is_omp() {
 # after its lifecycle and metadata locks bind the stable snapshot, and still
 # before watcher, endpoint, worktree, task-state, configuration, registry,
 # metadata, or extension mutation. The gate recognizes explicit, positional,
-# configured, batch, and raw selections.
+# configured, recorded, and batch selections.
 if spawn_selection_is_omp; then
   # A secondmate selection is refused first and unconditionally - its model is
   # never even consulted, because the refusal is on adapter identity alone.
-  if [ "$KIND" = secondmate ]; then
+  if [ "$SPAWN_EFFECTIVE_KIND" = secondmate ]; then
     refuse_omp_secondmate
     exit 1
   fi
-  if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS_ARG" != omp ]; then
-    echo "error: omp is reachable only through an explicit --harness omp selection; positional, configured, and raw omp launches are not allowed" >&2
+  if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_SELECTION_MODE" != explicit ]; then
+    echo "error: omp is reachable only through an explicit --harness omp selection; positional and configured omp launches are not allowed" >&2
     exit 1
   fi
   require_omp_launch_model || exit 1
@@ -879,7 +938,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home harness model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -906,20 +965,19 @@ spawn_remote_secondmate() {
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
-  positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote secondmate spawn accepts no local home positional argument" >&2
     return 2
   fi
-  if [ -n "$HARNESS_ARG" ]; then
-    harness=$HARNESS_ARG
-  elif [ -n "$positional" ]; then
-    harness=$positional
-  else
-    harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+  if [ -n "$FIRSTMATE_HOME" ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate spawn accepts no local home positional argument" >&2
+    return 2
   fi
+  harness=$SPAWN_EFFECTIVE_HARNESS
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
     *)
@@ -931,13 +989,13 @@ spawn_remote_secondmate() {
   esac
   model=${MODEL:--}
   effort=${EFFORT:--}
-  if [ -z "$HARNESS_ARG" ] && [ -z "$positional" ]; then
+  if [ "$SPAWN_SELECTION_MODE" = configured ]; then
     if [ "$MODEL_SET" -eq 0 ]; then
-      model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+      model=$SPAWN_CONFIG_MODEL
       [ -n "$model" ] || model=-
     fi
     if [ "$EFFORT_SET" -eq 0 ]; then
-      effort=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+      effort=$SPAWN_CONFIG_EFFORT
       [ -n "$effort" ] || effort=-
     fi
   fi
@@ -1373,13 +1431,9 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$SPAWN_I
   exit 1
 fi
 if [ "$SPAWN_IS_BATCH" -eq 1 ]; then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
-    exit 1
-  fi
   rc=0
   shared_args=()
-  [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  shared_args+=(--harness "$SPAWN_EFFECTIVE_HARNESS")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
@@ -1525,6 +1579,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   ARG3=${HARNESS_ARG:-$RELAUNCH_PRIOR_HARNESS}
   [ -n "$ARG3" ] || {
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
+    exit 1
+  }
+  [ "$ARG3" = "$SPAWN_EFFECTIVE_HARNESS" ] || {
+    echo "error: relaunch harness differs from the frozen preflight selection" >&2
     exit 1
   }
   if spawn_selection_is_omp; then
@@ -1723,38 +1781,11 @@ launch_template() {
   esac
 }
 
-case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
-    LAUNCH=$ARG3
-    HARNESS=$RAW_LAUNCH_IDENTITY
-    ;;
-  '')
-    # No explicit harness: resolve from config. A secondmate AGENT launches on the
-    # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
-    # every other kind uses the crew harness only when no dispatch profile file is
-    # active. Resolving here on every spawn is what makes the split DURABLE - a
-    # respawn (recovery, /updatefirstmate, restart) re-resolves, so
-    # config/secondmate-harness keeps governing secondmate launches across restarts.
-    # The launch_template lookup below is the unverified-adapter guard for both
-    # kinds: a harness with no template aborts the spawn.
-    if [ "$KIND" = secondmate ]; then
-      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
-      harness_src='config/secondmate-harness (falling back to config/crew-harness)'
-    else
-      if [ -f "$CONFIG/crew-dispatch.json" ]; then
-        echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
-        exit 1
-      fi
-      HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
-      harness_src='config/crew-harness'
-    fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
-    ;;
-  *)
-    HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
-    ;;
-esac
+HARNESS=$SPAWN_EFFECTIVE_HARNESS
+LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+  echo "error: no launch template for harness '$HARNESS' (from $SPAWN_HARNESS_SOURCE); select a verified named adapter with --harness" >&2
+  exit 1
+}
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
@@ -1767,8 +1798,8 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
-# Both omp refusals already ran for every fresh-spawn selection shape -
-# including a raw launch that claims omp - and for every relaunch the
+# Both omp refusals already ran for every named fresh-spawn selection shape
+# and for every relaunch the
 # read-only preflight could classify from the task's own record, before the
 # watcher guard and every lock. A relaunch creates nothing of its own - it
 # adopts the endpoint, worktree, and state the task already owns - and this
@@ -1820,17 +1851,17 @@ esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
-# --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
-# the harness itself came from the secondmate config fallback chain. Resolving
-# here on every spawn makes the pin durable across respawns. Precedence: explicit
+# --secondmate spawn and no explicit per-spawn harness was supplied, so the
+# harness itself came from the frozen secondmate config snapshot. Capturing that
+# snapshot on every spawn makes the pin durable across respawns. Precedence: explicit
 # --model/--effort flags still win over the file's tokens.
-if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
+if [ "$KIND" = secondmate ] && [ "$SPAWN_SELECTION_MODE" = configured ]; then
   if [ "$MODEL_SET" -eq 0 ]; then
-    SM_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model)
+    SM_MODEL=$SPAWN_CONFIG_MODEL
     [ -z "$SM_MODEL" ] || MODEL=$SM_MODEL
   fi
   if [ "$EFFORT_SET" -eq 0 ]; then
-    SM_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort)
+    SM_EFFORT=$SPAWN_CONFIG_EFFORT
     if [ -n "$SM_EFFORT" ]; then
       case "$SM_EFFORT" in
         low|medium|high|xhigh|max) EFFORT=$SM_EFFORT ;;
@@ -3376,6 +3407,16 @@ if [ "$KIND" = secondmate ]; then
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
+fi
+
+[ "$SPAWN_SELECTION_MODE" != raw ] \
+  && [ "$HARNESS" = "$SPAWN_EFFECTIVE_HARNESS" ] || {
+  echo "error: launch selection no longer matches the frozen verified adapter identity; refusing submission" >&2
+  exit 1
+}
+if [ "$HARNESS" = omp ]; then
+  refuse_omp_unverified_gates
+  exit 1
 fi
 
 spawn_record_traceparent() {

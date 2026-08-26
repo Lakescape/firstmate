@@ -678,10 +678,10 @@ fi
 fm_backend_validate_task_endpoint "$META" "$ID" cleanup || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
-WT=$(fm_meta_get "$META" worktree)
-PROJ=$(fm_meta_get "$META" project)
+WT=$FM_BACKEND_VALIDATED_WORKTREE
+PROJ=$FM_BACKEND_VALIDATED_PROJECT
 T_ORCA=
-[ "$BACKEND" != orca ] || T_ORCA=$T
+[ "$BACKEND" != orca ] || T_ORCA=$FM_BACKEND_VALIDATED_ORCA_TERMINAL
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
@@ -694,8 +694,8 @@ BUSY_GEN=$(fm_meta_get "$META" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
 fi
-ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
-ORCA_ALLOCATION=$(fm_meta_get "$META" orca_allocation)
+ORCA_WORKTREE_ID=$FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID
+ORCA_ALLOCATION=$FM_BACKEND_VALIDATED_ORCA_ALLOCATION
 ORCA_PATH_MATCH_VERIFIED=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
@@ -908,31 +908,7 @@ orca_allocation_has_worktree() {
   esac
 }
 
-require_orca_worktree_id() {
-  local meta=$1 id
-  id=$(meta_value "$meta" orca_worktree_id)
-  if [ -z "$id" ]; then
-    echo "error: missing orca_worktree_id in $meta; cannot remove Orca worktree" >&2
-    return 1
-  fi
-  printf '%s\n' "$id"
-}
-
-require_orca_terminal() {
-  local meta=$1 terminal
-  terminal=$(meta_value "$meta" terminal)
-  if [ -z "$terminal" ]; then
-    echo "error: missing terminal in $meta; cannot close Orca terminal" >&2
-    return 1
-  fi
-  printf '%s\n' "$terminal"
-}
-
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if orca_allocation_has_worktree "$ORCA_ALLOCATION"; then
-    ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
-  fi
-  T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
 
@@ -2308,28 +2284,27 @@ validate_firstmate_home_children_removal() {
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" cleanup || return 1
+    child_backend=$FM_BACKEND_VALIDATED_BACKEND
+    child_wt=$FM_BACKEND_VALIDATED_WORKTREE
+    child_proj=$FM_BACKEND_VALIDATED_PROJECT
+    child_orca_worktree_id=$FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID
+    child_orca_allocation=$FM_BACKEND_VALIDATED_ORCA_ALLOCATION
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
-    child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
-    child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
-      child_orca_allocation=$(meta_value "$child_meta" orca_allocation)
       if orca_allocation_has_worktree "$child_orca_allocation"; then
-        child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
         if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
-          child_proj=$(meta_value "$child_meta" project)
           validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
           require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
         fi
       fi
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
-      child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
   done
@@ -2462,7 +2437,7 @@ preflight_firstmate_home_herdr_children() {  # <home>
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ "$child_kind" = secondmate ]; then
-      child_wt=$(meta_value "$child_meta" worktree)
+      child_wt=$FM_BACKEND_VALIDATED_WORKTREE
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
       preflight_firstmate_home_herdr_children "$child_home" || return 1
@@ -2477,22 +2452,17 @@ cleanup_firstmate_home_children() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
-    child_wt=$(meta_value "$child_meta" worktree)
-    child_proj=$(meta_value "$child_meta" project)
+    fm_backend_validate_task_endpoint "$child_meta" "$child_id" cleanup || return 1
+    child_backend=$FM_BACKEND_VALIDATED_BACKEND
+    child_t=$FM_BACKEND_VALIDATED_TARGET
+    child_wt=$FM_BACKEND_VALIDATED_WORKTREE
+    child_proj=$FM_BACKEND_VALIDATED_PROJECT
+    child_orca_worktree_id=$FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID
+    child_orca_allocation=$FM_BACKEND_VALIDATED_ORCA_ALLOCATION
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
-    child_backend=$(fm_backend_of_meta "$child_meta")
-    child_orca_allocation=
-    if [ "$child_backend" = orca ]; then
-      child_t=$(fm_backend_cleanup_target_of_meta "$child_meta")
-      child_orca_allocation=$(meta_value "$child_meta" orca_allocation)
-    else
-      child_t=$(fm_backend_target_of_meta "$child_meta")
-    fi
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
-      child_orca_worktree_id=
       if orca_allocation_has_worktree "$child_orca_allocation"; then
-        child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
         if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
           validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         fi

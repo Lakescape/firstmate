@@ -1238,6 +1238,95 @@ test_target_exists_rejects_orca_error_json() {
   pass "fm_backend_target_exists: Orca ok:false read JSON is not live"
 }
 
+write_orca_recovery_identity_fixture() {  # <meta> <task-id> <allocation>
+  local meta=$1 id=$2 allocation=$3
+  case "$allocation" in
+    terminal-only)
+      fm_write_meta "$meta" \
+        "window=fm-$id" "endpoint_task_id=$id" "terminal=verified-nonexistent-terminal-$id" \
+        "worktree=" "project=$TMP_ROOT/verified-nonexistent-project-$id" \
+        "harness=claude" "kind=ship" "backend=orca" "orca_allocation=terminal-only"
+      ;;
+    cleanup-complete)
+      fm_write_meta "$meta" \
+        "window=fm-$id" "endpoint_task_id=$id" \
+        "worktree=" "project=$TMP_ROOT/verified-nonexistent-project-$id" \
+        "harness=claude" "kind=ship" "backend=orca" "orca_allocation=cleanup-complete"
+      ;;
+    worktree-only)
+      fm_write_meta "$meta" \
+        "window=fm-$id" "endpoint_task_id=$id" "terminal=verified-nonexistent-terminal-$id" \
+        "worktree=$TMP_ROOT/verified-nonexistent-worktree-$id" \
+        "project=$TMP_ROOT/verified-nonexistent-project-$id" \
+        "harness=claude" "kind=ship" "backend=orca" \
+        "orca_worktree_id=verified-nonexistent-worktree-id-$id" "orca_allocation=worktree-only"
+      ;;
+    worktree-id-only)
+      fm_write_meta "$meta" \
+        "window=fm-$id" "endpoint_task_id=$id" \
+        "worktree=" "project=$TMP_ROOT/verified-nonexistent-project-$id" \
+        "harness=claude" "kind=ship" "backend=orca" \
+        "orca_worktree_id=verified-nonexistent-worktree-id-$id" "orca_allocation=worktree-id-only"
+      ;;
+  esac
+}
+
+test_orca_recovery_rejects_ambiguous_optional_identities() {
+  local state allocation key variant id base meta out status value expected rows=0
+  state="$TMP_ROOT/ambiguous-recovery-identities"
+  mkdir -p "$state"
+  for allocation in terminal-only cleanup-complete worktree-only worktree-id-only; do
+    id="orca-${allocation//-/}-identity"
+    base="$state/$id.base"
+    write_orca_recovery_identity_fixture "$base" "$id" "$allocation"
+    out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2" cleanup; printf "%s|%s|%s|%s|%s" "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$FM_BACKEND_VALIDATED_ORCA_TERMINAL" "$FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID" "$FM_BACKEND_VALIDATED_ORCA_ALLOCATION"' \
+      "$ROOT" "$base" "$id")
+    case "$allocation" in
+      terminal-only)
+        expected="orca|verified-nonexistent-terminal-$id|verified-nonexistent-terminal-$id||terminal-only"
+        ;;
+      cleanup-complete) expected='orca||||cleanup-complete' ;;
+      worktree-only)
+        expected="orca|verified-nonexistent-terminal-$id|verified-nonexistent-terminal-$id|verified-nonexistent-worktree-id-$id|worktree-only"
+        ;;
+      worktree-id-only)
+        expected="orca|||verified-nonexistent-worktree-id-$id|worktree-id-only"
+        ;;
+    esac
+    [ "$out" = "$expected" ] \
+      || fail "$allocation base recovery snapshot was not exact: $out"
+    for key in terminal orca_worktree_id; do
+      for variant in empty duplicate; do
+        rows=$((rows + 1))
+        meta="$state/$id-$key-$variant.meta"
+        case "$variant" in
+          empty)
+            awk -F= -v field="$key" '$1 != field' "$base" > "$meta"
+            printf '%s=\n' "$key" >> "$meta"
+            ;;
+          duplicate)
+            value=$(grep "^$key=" "$base" | head -1 | cut -d= -f2-)
+            [ -n "$value" ] || value="verified-nonexistent-$key-$id"
+            awk -F= -v field="$key" '$1 != field' "$base" > "$meta"
+            printf '%s=%s\n%s=%s\n' "$key" "$value" "$key" "$value" >> "$meta"
+            ;;
+        esac
+        set +e
+        out=$(bash -c '. "$0/bin/fm-backend.sh"; fm_backend_validate_task_endpoint "$1" "$2" cleanup; rc=$?; printf "\nSNAP=%s|%s|%s|%s|%s\n" "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET" "$FM_BACKEND_VALIDATED_ORCA_TERMINAL" "$FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID" "$FM_BACKEND_VALIDATED_ORCA_ALLOCATION"; exit "$rc"' \
+          "$ROOT" "$meta" "$id" 2>&1)
+        status=$?
+        set -e
+        [ "$status" -ne 0 ] \
+          || fail "$allocation accepted $variant $key recovery identity"
+        assert_contains "$out" "SNAP=||||" \
+          "$allocation $variant $key refusal retained a partially validated identity"
+      done
+    done
+  done
+  [ "$rows" -eq 16 ] || fail "ambiguous recovery identity matrix lost a row"
+  pass "Orca recovery rejects 16 empty or duplicate optional identity shapes"
+}
+
 test_endpoint_validation_accepts_live_composite_orca_worktree_id() {
   local state id wt proj out
   state="$TMP_ROOT/composite-id-state"
@@ -1487,6 +1576,66 @@ test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
   [ ! -s "$LOG" ] || fail "cleanup-complete recovery retry dispatched another Orca cleanup"
   assert_absent "$state/$id.meta" "successful cleanup-complete retry retained task metadata"
   pass "Orca recovery advances metadata after completed or already-absent cleanup"
+}
+
+test_teardown_uses_only_validated_orca_identities() {
+  local proj wt data state config id meta neutral marker out rc log_text
+  id="orcavalidatedidentityz6"
+  proj="$TMP_ROOT/validated-identity-project"
+  wt="$TMP_ROOT/validated-identity-worktree"
+  data="$TMP_ROOT/validated-identity-data"
+  state="$TMP_ROOT/validated-identity-state"
+  config="$TMP_ROOT/validated-identity-config"
+  meta="$state/$id.meta"
+  marker="$state/guard-swapped-identities"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  fm_write_meta "$meta" \
+    "window=fm-$id" "endpoint_task_id=$id" \
+    "terminal=verified-nonexistent-terminal-original" \
+    "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" \
+    "mode=no-mistakes" "yolo=off" "backend=orca" \
+    "orca_worktree_id=verified-nonexistent-worktree-original" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case validated-identity-cleanup
+  printf '{"ok":true,"result":{"worktree":{"id":"verified-nonexistent-worktree-original","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/3.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  cat > "$neutral/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+temporary="${FM_TEST_SWAP_META:?}.swap.$$"
+awk '
+  /^terminal=/ { print "terminal=verified-nonexistent-terminal-decoy"; next }
+  /^orca_worktree_id=/ { print "orca_worktree_id=verified-nonexistent-worktree-decoy"; next }
+  { print }
+' "$FM_TEST_SWAP_META" > "$temporary"
+mv "$temporary" "$FM_TEST_SWAP_META"
+touch "${FM_TEST_SWAP_MARKER:?}"
+SH
+  chmod +x "$neutral/bin/fm-guard.sh"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_TEST_SWAP_META="$meta" FM_TEST_SWAP_MARKER="$marker" FM_ROOT_OVERRIDE="$neutral" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "teardown did not retain validator-captured Orca identities"$'\n'"$out"
+  assert_present "$marker" "teardown identity fixture did not swap metadata after validation"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'--terminal\x1fverified-nonexistent-terminal-original' \
+    "teardown did not close the validator-captured terminal"
+  assert_contains "$log_text" $'--worktree\x1fid:verified-nonexistent-worktree-original' \
+    "teardown did not remove the validator-captured worktree"
+  assert_not_contains "$log_text" "verified-nonexistent-terminal-decoy" \
+    "teardown re-read the decoy terminal written after validation"
+  assert_not_contains "$log_text" "verified-nonexistent-worktree-decoy" \
+    "teardown re-read the decoy worktree ID written after validation"
+  assert_absent "$meta" "successful validated-identity cleanup retained metadata"
+  pass "Orca teardown consumes only identities captured by successful validation"
 }
 
 test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
@@ -1903,6 +2052,7 @@ test_spawn_preserves_terminal_only_recovery_until_close_succeeds
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
+test_orca_recovery_rejects_ambiguous_optional_identities
 test_endpoint_validation_accepts_live_composite_orca_worktree_id
 test_endpoint_validation_refuses_composite_orca_path_mismatch
 test_scout_teardown_removes_orca_worktree_via_helper
@@ -1910,6 +2060,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
 test_recovery_teardown_retires_closed_terminal_before_worktree_retry
+test_teardown_uses_only_validated_orca_identities
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches

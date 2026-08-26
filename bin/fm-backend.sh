@@ -380,8 +380,8 @@ fm_backend_cleanup_target_of_meta() {  # <meta-file>
 # and worktree. New non-tmux records carry endpoint_task_id because their
 # opaque runtime ids do not encode the task label. Legacy tmux records remain
 # valid only when their window name itself is exactly fm-<task-id>.
-# On success, sets FM_BACKEND_VALIDATED_BACKEND and
-# FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# On success, sets the FM_BACKEND_VALIDATED_* identity snapshot. On failure,
+# prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -389,6 +389,16 @@ fm_backend_meta_exact_value() {  # <meta-file> <key>
   value=$(grep "^$key=" "$meta" | cut -d= -f2-)
   [ -n "$value" ] || return 1
   printf '%s' "$value"
+}
+
+fm_backend_meta_optional_exact_value() {  # <meta-file> <key>
+  local meta=$1 key=$2 count
+  count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
+  case "$count" in
+    0) return 0 ;;
+    1) fm_backend_meta_exact_value "$meta" "$key" ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_backend_endpoint_atom_valid() {  # <value>
@@ -438,10 +448,15 @@ fm_backend_orca_cleanup_id_valid() {
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup]
   local meta=$1 id=$2 validation_scope=${3:-endpoint}
   local backend_count backend window worktree worktree_count project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
-  local allocation_count allocation
+  local session pane recorded_session workspace tab terminal= worktree_id= surface
+  local allocation_count allocation=
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
+  FM_BACKEND_VALIDATED_WORKTREE=
+  FM_BACKEND_VALIDATED_PROJECT=
+  FM_BACKEND_VALIDATED_ORCA_TERMINAL=
+  FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID=
+  FM_BACKEND_VALIDATED_ORCA_ALLOCATION=
   case "$validation_scope" in endpoint|cleanup) ;; *) return 1 ;; esac
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "REFUSED: task $id has no regular endpoint metadata at $meta; preserving task state." >&2
@@ -553,8 +568,14 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
         echo "REFUSED: legacy Orca endpoint metadata for task $id lacks an exact task binding; preserving task state." >&2
         return 1
       }
-      terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
-      worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
+      terminal=$(fm_backend_meta_optional_exact_value "$meta" terminal) || {
+        echo "REFUSED: Orca endpoint metadata for task $id has an empty or ambiguous terminal identity; preserving task state." >&2
+        return 1
+      }
+      worktree_id=$(fm_backend_meta_optional_exact_value "$meta" orca_worktree_id) || {
+        echo "REFUSED: Orca endpoint metadata for task $id has an empty or ambiguous worktree identity; preserving task state." >&2
+        return 1
+      }
       allocation_count=$(grep -c '^orca_allocation=' "$meta" 2>/dev/null || true)
       case "$allocation_count" in
         0) allocation= ;;
@@ -627,6 +648,16 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [endpoint|cleanup
   FM_BACKEND_VALIDATED_BACKEND=$backend
   # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
   FM_BACKEND_VALIDATED_TARGET=$window
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_BACKEND_VALIDATED_WORKTREE=$worktree
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_BACKEND_VALIDATED_PROJECT=$project
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_BACKEND_VALIDATED_ORCA_TERMINAL=$terminal
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID=$worktree_id
+  # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+  FM_BACKEND_VALIDATED_ORCA_ALLOCATION=$allocation
   return 0
 }
 

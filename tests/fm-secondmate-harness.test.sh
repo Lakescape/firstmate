@@ -440,6 +440,29 @@ make_seeded_home() {
   printf 'charter\n' > "$home/data/charter.md"
 }
 
+make_secondmate_selection_root() {
+  local dir=$1 root="$1/root" entry
+  mkdir -p "$root/bin"
+  for entry in "$ROOT/bin"/*; do
+    ln -s "$entry" "$root/bin/$(basename "$entry")"
+  done
+  rm "$root/bin/fm-harness.sh"
+  cat > "$root/bin/fm-harness.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+output=$("${FM_TEST_REAL_HARNESS:?}" "$@") || exit $?
+if [ ! -e "${FM_TEST_SELECTION_MARKER:?}" ]; then
+  temporary="${FM_TEST_SELECTION_FILE:?}.swap.$$"
+  printf '%s\n' "${FM_TEST_SELECTION_VALUE:?}" > "$temporary"
+  mv "$temporary" "$FM_TEST_SELECTION_FILE"
+  touch "$FM_TEST_SELECTION_MARKER"
+fi
+printf '%s\n' "$output"
+SH
+  chmod +x "$root/bin/fm-harness.sh"
+  printf '%s\n' "$root"
+}
+
 # spawn_secondmate <world> <id> <home> [explicit-harness]
 # Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
 # resolves), the primary config dir is <world>/home/config, and CLAUDECODE pins
@@ -674,11 +697,52 @@ spawn_secondmate_capture() {
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
   PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+    FM_ROOT_OVERRIDE="${FM_TEST_SECOND_MATE_ROOT_OVERRIDE:-$ROOT}" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_TEST_REAL_HARNESS="${FM_TEST_REAL_HARNESS:-}" \
+    FM_TEST_SELECTION_FILE="${FM_TEST_SELECTION_FILE:-}" \
+    FM_TEST_SELECTION_VALUE="${FM_TEST_SELECTION_VALUE:-}" \
+    FM_TEST_SELECTION_MARKER="${FM_TEST_SELECTION_MARKER:-}" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
+}
+
+test_secondmate_selection_snapshot_is_immutable() {
+  local w sm meta launchlog launch root marker out status
+  w="$TMP_ROOT/spawn-secondmate-snapshot"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  marker="$w/selection-mutated"
+  mkdir -p "$w/home/config"
+  printf 'claude opus high\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+  root=$(make_secondmate_selection_root "$w/mutating-root")
+
+  out=$(FM_TEST_SECOND_MATE_ROOT_OVERRIDE="$root" \
+    FM_TEST_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
+    FM_TEST_SELECTION_FILE="$w/home/config/secondmate-harness" \
+    FM_TEST_SELECTION_VALUE='omp anthropic/changed low' \
+    FM_TEST_SELECTION_MARKER="$marker" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1)
+  status=$?
+  expect_code 0 "$status" "secondmate did not retain its frozen harness snapshot"$'\n'"$out"
+  assert_present "$marker" "secondmate selection fixture did not mutate config"
+  [ "$(cat "$w/home/config/secondmate-harness")" = 'omp anthropic/changed low' ] \
+    || fail "secondmate selection fixture did not replace its config"
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] \
+    || fail "secondmate did not publish the frozen Claude harness"
+  [ "$(meta_field "$meta" model)" = opus ] \
+    || fail "secondmate did not publish the frozen model"
+  [ "$(meta_field "$meta" effort)" = high ] \
+    || fail "secondmate did not publish the frozen effort"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'opus' --effort 'high'" \
+    "secondmate did not submit the frozen harness/model/effort template"
+  assert_not_contains "$launch" "FM_OMP_HARNESS" \
+    "secondmate submitted OMP after its configuration changed"
+  pass "secondmate submits one frozen harness, model, and effort snapshot"
 }
 
 test_spawn_backend_precedence_over_inherited_config() {
@@ -2570,6 +2634,7 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens
 test_spawn_explicit_harness_uses_explicit_profile_axes
 test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
+test_secondmate_selection_snapshot_is_immutable
 test_bootstrap_sweep_propagates_and_reconverges
 test_bootstrap_sweep_propagates_when_tracked_current
 test_bootstrap_sweep_defers_dispatch_on_stale_unignored_home

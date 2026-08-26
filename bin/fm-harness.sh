@@ -3,6 +3,7 @@
 # Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
+#        fm-harness.sh crew-snapshot    print one resolved CREWMATE harness/model/effort snapshot
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
 #                                        SECONDMATE agents: config/secondmate-harness ->
 #                                        config/crew-harness -> own. "default" or absent
@@ -13,6 +14,7 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh secondmate-snapshot print one resolved SECONDMATE harness/model/effort snapshot
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
@@ -127,10 +129,20 @@ detect_own() {
 
 # Resolve the effective crewmate harness: config/crew-harness (a bare adapter
 # name) wins; absent or "default" mirrors firstmate's own harness.
-resolve_crew() {
+resolve_crew_value() {
   local crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
-  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else echo "$crew"; fi
+  if [ -z "$crew" ] || [ "$crew" = "default" ]; then detect_own; else printf '%s\n' "$crew"; fi
+}
+
+resolve_crew() {
+  resolve_crew_value
+}
+
+resolve_crew_snapshot() {
+  local harness
+  harness=$(resolve_crew_value)
+  printf 'harness=%s\nmodel=\neffort=\n' "$harness"
 }
 
 # Print the first non-empty, non-comment line of config/secondmate-harness
@@ -197,10 +209,30 @@ resolve_secondmate_effort() {
   secondmate_field 3
 }
 
+resolve_secondmate_snapshot() {
+  local line harness= model= effort=
+  line=$(secondmate_line)
+  if [ -n "$line" ]; then
+    # shellcheck disable=SC2086
+    set -- $line
+    harness=${1:-}
+    model=${2:-}
+    effort=${3:-}
+  fi
+  if [ -z "$harness" ] || [ "$harness" = default ]; then
+    harness=$(resolve_crew_value)
+    model=
+    effort=
+  fi
+  printf 'harness=%s\nmodel=%s\neffort=%s\n' "$harness" "$model" "$effort"
+}
+
 case "${1:-}" in
   crew) resolve_crew ;;
+  crew-snapshot) resolve_crew_snapshot ;;
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
+  secondmate-snapshot) resolve_secondmate_snapshot ;;
   *) detect_own ;;
 esac
