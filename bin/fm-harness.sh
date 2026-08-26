@@ -3,7 +3,7 @@
 # Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
-#        fm-harness.sh crew-snapshot    print one resolved CREWMATE harness/model/effort snapshot
+#        fm-harness.sh crew-snapshot    print one resolved CREWMATE dispatch/harness/model/effort snapshot
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
 #                                        SECONDMATE agents: config/secondmate-harness ->
 #                                        config/crew-harness -> own. "default" or absent
@@ -14,7 +14,7 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
-#        fm-harness.sh secondmate-snapshot print one resolved SECONDMATE harness/model/effort snapshot
+#        fm-harness.sh secondmate-snapshot print one resolved SECONDMATE dispatch/harness/model/effort snapshot
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
@@ -139,10 +139,83 @@ resolve_crew() {
   resolve_crew_value
 }
 
+fm_harness_capture_file() {
+  local path=$1 bytes payload payload_bytes sentinel=$'\036'
+  FM_HARNESS_CAPTURE_PRESENT=0
+  FM_HARNESS_CAPTURE_TEXT=
+  [ -f "$path" ] || return 0
+  bytes=$(LC_ALL=C wc -c 2>/dev/null < "$path") || return 1
+  bytes=${bytes//[[:space:]]/}
+  case "$bytes" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  payload=$( (cat "$path" && printf '%s' "$sentinel") 2>/dev/null) || return 1
+  case "$payload" in
+    *"$sentinel") ;;
+    *) return 1 ;;
+  esac
+  payload=${payload%"$sentinel"}
+  payload_bytes=$(printf '%s' "$payload" | LC_ALL=C wc -c) || return 1
+  payload_bytes=${payload_bytes//[[:space:]]/}
+  [ "$payload_bytes" = "$bytes" ] || return 1
+  FM_HARNESS_CAPTURE_PRESENT=1
+  FM_HARNESS_CAPTURE_TEXT=$payload
+}
+
+fm_harness_capture_inputs() {
+  local mode=$1
+  fm_harness_capture_file "$CONFIG/crew-dispatch.json" || return 1
+  FM_HARNESS_INPUT_DISPATCH_PRESENT=$FM_HARNESS_CAPTURE_PRESENT
+  FM_HARNESS_INPUT_DISPATCH_TEXT=$FM_HARNESS_CAPTURE_TEXT
+  fm_harness_capture_file "$CONFIG/crew-harness" || return 1
+  FM_HARNESS_INPUT_CREW_PRESENT=$FM_HARNESS_CAPTURE_PRESENT
+  FM_HARNESS_INPUT_CREW_TEXT=$FM_HARNESS_CAPTURE_TEXT
+  FM_HARNESS_INPUT_SECONDMATE_PRESENT=0
+  FM_HARNESS_INPUT_SECONDMATE_TEXT=
+  if [ "$mode" = secondmate ]; then
+    fm_harness_capture_file "$CONFIG/secondmate-harness" || return 1
+    FM_HARNESS_INPUT_SECONDMATE_PRESENT=$FM_HARNESS_CAPTURE_PRESENT
+    FM_HARNESS_INPUT_SECONDMATE_TEXT=$FM_HARNESS_CAPTURE_TEXT
+  fi
+}
+
+fm_harness_stable_inputs() {
+  local mode=$1 attempt=0
+  local dispatch_present dispatch_text crew_present crew_text
+  local secondmate_present secondmate_text
+  while [ "$attempt" -lt 4 ]; do
+    attempt=$((attempt + 1))
+    fm_harness_capture_inputs "$mode" || continue
+    dispatch_present=$FM_HARNESS_INPUT_DISPATCH_PRESENT
+    dispatch_text=$FM_HARNESS_INPUT_DISPATCH_TEXT
+    crew_present=$FM_HARNESS_INPUT_CREW_PRESENT
+    crew_text=$FM_HARNESS_INPUT_CREW_TEXT
+    secondmate_present=$FM_HARNESS_INPUT_SECONDMATE_PRESENT
+    secondmate_text=$FM_HARNESS_INPUT_SECONDMATE_TEXT
+    fm_harness_capture_inputs "$mode" || continue
+    [ "$FM_HARNESS_INPUT_DISPATCH_PRESENT" = "$dispatch_present" ] || continue
+    [ "$FM_HARNESS_INPUT_DISPATCH_TEXT" = "$dispatch_text" ] || continue
+    [ "$FM_HARNESS_INPUT_CREW_PRESENT" = "$crew_present" ] || continue
+    [ "$FM_HARNESS_INPUT_CREW_TEXT" = "$crew_text" ] || continue
+    [ "$FM_HARNESS_INPUT_SECONDMATE_PRESENT" = "$secondmate_present" ] || continue
+    [ "$FM_HARNESS_INPUT_SECONDMATE_TEXT" = "$secondmate_text" ] || continue
+    return 0
+  done
+  return 1
+}
+
+resolve_captured_crew_value() {
+  local crew
+  crew=$(printf '%s' "$FM_HARNESS_INPUT_CREW_TEXT" | tr -d '[:space:]') || return 1
+  if [ -z "$crew" ] || [ "$crew" = default ]; then detect_own; else printf '%s\n' "$crew"; fi
+}
+
 resolve_crew_snapshot() {
   local harness
-  harness=$(resolve_crew_value)
-  printf 'harness=%s\nmodel=\neffort=\n' "$harness"
+  fm_harness_stable_inputs crew || return 1
+  harness=$(resolve_captured_crew_value) || return 1
+  printf 'dispatch_active=%s\nharness=%s\nmodel=\neffort=\n' \
+    "$FM_HARNESS_INPUT_DISPATCH_PRESENT" "$harness"
 }
 
 # Print the first non-empty, non-comment line of config/secondmate-harness
@@ -178,6 +251,20 @@ secondmate_field() {
   esac
 }
 
+secondmate_line_from_text() {
+  local text=$1 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    case "$line" in
+      '#'*) continue ;;
+    esac
+    printf '%s\n' "$line"
+    return 0
+  done <<< "$text"
+}
+
 # Resolve the harness the PRIMARY uses to launch SECONDMATE agents: a fallback
 # chain config/secondmate-harness -> config/crew-harness -> own. An absent or
 # "default" secondmate-harness token defers to the crew resolution, so an unset
@@ -211,7 +298,8 @@ resolve_secondmate_effort() {
 
 resolve_secondmate_snapshot() {
   local line harness= model= effort=
-  line=$(secondmate_line)
+  fm_harness_stable_inputs secondmate || return 1
+  line=$(secondmate_line_from_text "$FM_HARNESS_INPUT_SECONDMATE_TEXT")
   if [ -n "$line" ]; then
     # shellcheck disable=SC2086
     set -- $line
@@ -220,11 +308,12 @@ resolve_secondmate_snapshot() {
     effort=${3:-}
   fi
   if [ -z "$harness" ] || [ "$harness" = default ]; then
-    harness=$(resolve_crew_value)
+    harness=$(resolve_captured_crew_value) || return 1
     model=
     effort=
   fi
-  printf 'harness=%s\nmodel=%s\neffort=%s\n' "$harness" "$model" "$effort"
+  printf 'dispatch_active=%s\nharness=%s\nmodel=%s\neffort=%s\n' \
+    "$FM_HARNESS_INPUT_DISPATCH_PRESENT" "$harness" "$model" "$effort"
 }
 
 case "${1:-}" in

@@ -608,7 +608,8 @@ relaunch_rollback() {
 
 load_secondmate_relaunch_snapshot() {
   local snapshot line key value
-  local harness= model= effort= harness_seen=0 model_seen=0 effort_seen=0
+  local dispatch_active= harness= model= effort=
+  local dispatch_seen=0 harness_seen=0 model_seen=0 effort_seen=0
   snapshot=$("$SCRIPT_DIR/fm-harness.sh" secondmate-snapshot 2>/dev/null) || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -616,6 +617,11 @@ load_secondmate_relaunch_snapshot() {
       *) return 1 ;;
     esac
     case "$key" in
+      dispatch_active)
+        [ "$dispatch_seen" -eq 0 ] || return 1
+        dispatch_active=$value
+        dispatch_seen=1
+        ;;
       harness)
         [ "$harness_seen" -eq 0 ] || return 1
         harness=$value
@@ -636,8 +642,13 @@ load_secondmate_relaunch_snapshot() {
   done <<EOF
 $snapshot
 EOF
-  [ "$harness_seen" -eq 1 ] && [ "$model_seen" -eq 1 ] \
-    && [ "$effort_seen" -eq 1 ] && [ -n "$harness" ] || return 1
+  [ "$dispatch_seen" -eq 1 ] && [ "$harness_seen" -eq 1 ] \
+    && [ "$model_seen" -eq 1 ] && [ "$effort_seen" -eq 1 ] \
+    && [ -n "$harness" ] || return 1
+  case "$dispatch_active" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
   CONFIG_HARNESS=$harness
   CONFIG_MODEL=$model
   CONFIG_EFFORT=$effort
@@ -666,7 +677,7 @@ resolve_relaunch_profile() {
     # harness comes from firstmate's own dispatch-profile judgment at intake,
     # and silently re-resolving it would bypass that consultation.
     load_secondmate_relaunch_snapshot \
-      || die "could not resolve one complete secondmate harness snapshot before relaunch"
+      || die "could not resolve one complete secondmate dispatch and harness snapshot before relaunch"
     case "$CONFIG_EFFORT" in
       ''|low|medium|high|xhigh|max) ;;
       *)

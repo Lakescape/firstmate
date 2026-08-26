@@ -208,6 +208,7 @@ The dispatch file is intentionally judgment-based: firstmate reads the natural-l
 The shell scripts validate the JSON shape and verified harness/effort combinations, but they do not parse task intent, match natural-language rules, or own array selection.
 The session-start bootstrap step keeps valid dispatch configuration silent unless verbose facts are enabled and surfaces a concise invalid-config line when validation fails.
 When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without an explicit harness, so `config/crew-harness` is only automatic when no dispatch profile file is active.
+The resolver captures dispatch presence and the configured harness axes together, retries a bounded number of times if any input changes, and hands one immutable tuple to the spawn gates and submission path.
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse while preserving the requested profile for later audit.
@@ -246,7 +247,7 @@ Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and may also carry optional model and effort tokens as `<harness> [<model>] [<effort>]` on the first non-empty, non-comment line.
 A bare harness line remains harness-only, so existing `config/secondmate-harness` files keep their previous behavior.
 When the harness token is unset or `default`, launch falls back to `config/crew-harness`, then to the primary's own harness, and the model and effort tokens are ignored.
-Those optional tokens are resolved with the harness in one immutable snapshot on every secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
+Those optional tokens, the fallback crew harness, and crew-dispatch presence are resolved in one immutable stable multi-file snapshot on every configured secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
 For a local route, an explicit per-spawn named harness does not inherit model or effort tokens from `config/secondmate-harness`.
 Local and remote routes accept verified named adapters only and reject opaque raw launch commands before provisioning.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.

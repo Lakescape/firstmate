@@ -105,6 +105,78 @@ enable_dispatch_profile() {
     > "$home/config/crew-dispatch.json"
 }
 
+make_dispatch_transition_root() {
+  local dir=$1 root entry
+  root="$dir/root"
+  mkdir -p "$root/bin"
+  for entry in "$ROOT/bin"/*; do
+    ln -s "$entry" "$root/bin/$(basename "$entry")"
+  done
+  rm "$root/bin/fm-harness.sh"
+  cat > "$root/bin/fm-harness.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = crew-snapshot ] && [ ! -e "${FM_TEST_SNAPSHOT_MARKER:?}" ]; then
+  dispatch_tmp="${FM_TEST_SNAPSHOT_DISPATCH:?}.swap.$$"
+  harness_tmp="${FM_TEST_SNAPSHOT_HARNESS:?}.swap.$$"
+  printf '%s\n' '{"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' > "$dispatch_tmp"
+  mv "$dispatch_tmp" "$FM_TEST_SNAPSHOT_DISPATCH"
+  printf 'codex\n' > "$harness_tmp"
+  mv "$harness_tmp" "$FM_TEST_SNAPSHOT_HARNESS"
+  snapshot=$("${FM_TEST_REAL_HARNESS:?}" "$@") || exit $?
+  rm -f "$FM_TEST_SNAPSHOT_DISPATCH"
+  touch "$FM_TEST_SNAPSHOT_MARKER"
+  printf '%s\n' "$snapshot"
+  exit 0
+fi
+exec "${FM_TEST_REAL_HARNESS:?}" "$@"
+SH
+  chmod +x "$root/bin/fm-harness.sh"
+  printf '%s\n' "$root"
+}
+
+make_capture_transition_root() {
+  local dir=$1 root fakebin entry
+  root="$dir/root"
+  fakebin="$dir/fakebin"
+  mkdir -p "$root/bin" "$fakebin"
+  for entry in "$ROOT/bin"/*; do
+    ln -s "$entry" "$root/bin/$(basename "$entry")"
+  done
+  rm "$root/bin/fm-harness.sh"
+  cat > "$root/bin/fm-harness.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = crew-snapshot ]; then
+  PATH="${FM_TEST_CAPTURE_FAKEBIN:?}:$PATH" exec "${FM_TEST_REAL_HARNESS:?}" "$@"
+fi
+exec "${FM_TEST_REAL_HARNESS:?}" "$@"
+SH
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "${FM_TEST_SNAPSHOT_HARNESS:?}" ] \
+   && [ ! -e "${FM_TEST_SNAPSHOT_MARKER:?}" ]; then
+  "${FM_TEST_REAL_CAT:?}" "$@"
+  harness_tmp="${FM_TEST_SNAPSHOT_HARNESS}.swap.$$"
+  printf 'codex\n' > "$harness_tmp"
+  mv "$harness_tmp" "$FM_TEST_SNAPSHOT_HARNESS"
+  if [ -e "$FM_TEST_SNAPSHOT_MARKER.stage-one" ]; then
+    dispatch_tmp="${FM_TEST_SNAPSHOT_DISPATCH:?}.swap.$$"
+    printf '%s\n' '{"default":{"harness":"codex","model":"gpt-5","effort":"medium"}}' > "$dispatch_tmp"
+    mv "$dispatch_tmp" "$FM_TEST_SNAPSHOT_DISPATCH"
+    touch "$FM_TEST_SNAPSHOT_MARKER"
+  else
+    touch "$FM_TEST_SNAPSHOT_MARKER.stage-one"
+  fi
+  exit 0
+fi
+exec "${FM_TEST_REAL_CAT:?}" "$@"
+SH
+  chmod +x "$root/bin/fm-harness.sh" "$fakebin/cat"
+  printf '%s|%s\n' "$root" "$fakebin"
+}
+
 make_seeded_secondmate_home() {
   local home=$1 id=$2
   mkdir -p "$home/bin" "$home/data"
@@ -121,7 +193,7 @@ run_spawn() {
   # explicitly (empty by default) instead of leaking the invoking shell's value,
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -129,7 +201,13 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
-    GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
+    FM_TEST_REAL_HARNESS="${FM_TEST_REAL_HARNESS:-}" \
+    FM_TEST_SNAPSHOT_DISPATCH="${FM_TEST_SNAPSHOT_DISPATCH:-}" \
+    FM_TEST_SNAPSHOT_HARNESS="${FM_TEST_SNAPSHOT_HARNESS:-}" \
+    FM_TEST_SNAPSHOT_MARKER="${FM_TEST_SNAPSHOT_MARKER:-}" \
+    FM_TEST_CAPTURE_FAKEBIN="${FM_TEST_CAPTURE_FAKEBIN:-}" \
+    FM_TEST_REAL_CAT="${FM_TEST_REAL_CAT:-}" \
+    GROK_HOME="$home/grok-home" FM_BACKEND=tmux PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -363,6 +441,74 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
     "scout refusal did not explain the dispatch-profile backstop"
   assert_absent "$HOME_DIR/state/$id.meta" "scout refusal should happen before meta is written"
   pass "active crew-dispatch profile requires an explicit harness for scout spawns"
+}
+
+test_dispatch_transition_cannot_synthesize_an_implicit_harness() {
+  local kind rec id root marker out status
+  for kind in ship scout; do
+    id="profile-snapshot-$kind-z12b"
+    rec=$(make_spawn_case "profile-snapshot-$kind" claude "$id")
+    read_case_record "$rec"
+    root=$(make_dispatch_transition_root "$CASE_DIR/transition-root")
+    marker="$CASE_DIR/transition-complete"
+    if [ "$kind" = scout ]; then
+      out=$(FM_TEST_ROOT_OVERRIDE="$root" FM_TEST_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
+        FM_TEST_SNAPSHOT_DISPATCH="$HOME_DIR/config/crew-dispatch.json" \
+        FM_TEST_SNAPSHOT_HARNESS="$HOME_DIR/config/crew-harness" \
+        FM_TEST_SNAPSHOT_MARKER="$marker" \
+        run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR" --scout)
+    else
+      out=$(FM_TEST_ROOT_OVERRIDE="$root" FM_TEST_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
+        FM_TEST_SNAPSHOT_DISPATCH="$HOME_DIR/config/crew-dispatch.json" \
+        FM_TEST_SNAPSHOT_HARNESS="$HOME_DIR/config/crew-harness" \
+        FM_TEST_SNAPSHOT_MARKER="$marker" \
+        run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+        "$id" "$PROJ_DIR")
+    fi
+    status=$?
+    expect_code 1 "$status" "$kind spawn must refuse the coherent active-dispatch snapshot"
+    assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
+      "$kind spawn did not consume dispatch presence from the harness snapshot"
+    assert_present "$marker" "$kind transition fixture did not publish the new config"
+    [ "$(cat "$HOME_DIR/config/crew-harness")" = codex ] \
+      || fail "$kind transition fixture did not publish crew-harness=codex"
+    assert_absent "$HOME_DIR/config/crew-dispatch.json" \
+      "$kind spawn re-read dispatch presence after the frozen snapshot"
+    assert_absent "$HOME_DIR/state/$id.meta" "$kind transition published task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$kind transition submitted an implicit adapter launch"
+  done
+  pass "crew and scout consume one coherent dispatch and harness snapshot"
+}
+
+test_resolver_retries_a_mid_capture_transition() {
+  local rec id=root-capture-race-z12c root_record root capture_fakebin marker out status
+  rec=$(make_spawn_case profile-capture-race claude "$id")
+  read_case_record "$rec"
+  root_record=$(make_capture_transition_root "$CASE_DIR/capture-root")
+  IFS='|' read -r root capture_fakebin <<EOF
+$root_record
+EOF
+  marker="$CASE_DIR/capture-transition-complete"
+  out=$(FM_TEST_ROOT_OVERRIDE="$root" FM_TEST_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
+    FM_TEST_SNAPSHOT_DISPATCH="$HOME_DIR/config/crew-dispatch.json" \
+    FM_TEST_SNAPSHOT_HARNESS="$HOME_DIR/config/crew-harness" \
+    FM_TEST_SNAPSHOT_MARKER="$marker" FM_TEST_CAPTURE_FAKEBIN="$capture_fakebin" \
+    FM_TEST_REAL_CAT="$(command -v cat)" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a config change during capture must retry to a coherent active snapshot"
+  assert_contains "$out" "config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules" \
+    "mid-capture transition did not retry to the coherent active snapshot"
+  assert_present "$marker" "mid-capture transition fixture did not run"
+  [ "$(cat "$HOME_DIR/config/crew-harness")" = codex ] \
+    || fail "mid-capture transition did not publish crew-harness=codex"
+  assert_present "$HOME_DIR/config/crew-dispatch.json" \
+    "mid-capture transition did not publish the dispatch profile"
+  assert_absent "$HOME_DIR/state/$id.meta" "mid-capture transition published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "mid-capture transition submitted an implicit adapter launch"
+  pass "resolver retries a configuration change during snapshot capture"
 }
 
 test_active_dispatch_profile_allows_explicit_harness() {
@@ -834,6 +980,8 @@ test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
+test_dispatch_transition_cannot_synthesize_an_implicit_harness
+test_resolver_retries_a_mid_capture_transition
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_refuses_raw_launch_command

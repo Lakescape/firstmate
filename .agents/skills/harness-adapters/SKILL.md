@@ -49,8 +49,8 @@ If the captain asks for a new harness, propose verifying it first: add a named, 
 Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-signed` alongside `PI_CODING_AGENT=true` selects the signed identity; unmarked shared launcher ancestry remains `pi`.
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
-`bin/fm-harness.sh crew-snapshot` and `secondmate-snapshot` emit harness, model, and effort from one resolution; the scalar modes remain read-only views for callers that need one field.
-`bin/fm-spawn.sh` consumes exactly one matching snapshot for each configured crewmate, scout, or secondmate launch, freezes all three fields together before mutation, and uses that immutable tuple through selection gating, template construction, dormancy checks, and final submission; an explicit per-spawn harness arg overrides configuration.
+`bin/fm-harness.sh crew-snapshot` and `secondmate-snapshot` emit dispatch presence, harness, model, and effort from one bounded stable multi-file capture; they retry when any captured input changes and fail closed without emitting a partial tuple when no stable capture is available. The scalar modes remain read-only views for callers that need one field.
+`bin/fm-spawn.sh` consumes exactly one matching snapshot for each configured crewmate, scout, or secondmate launch, freezes all four fields together before mutation, and uses that immutable tuple through dispatch gating, adapter selection, template construction, dormancy checks, and final submission; an explicit per-spawn harness arg overrides configuration without consuming ambient config.
 For a secondmate relaunch without an explicit harness, `bin/fm-control.sh` consumes the same single snapshot before any checkpoint or stop.
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.

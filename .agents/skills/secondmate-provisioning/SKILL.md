@@ -89,7 +89,7 @@ It also writes the gitignored `.fm-secondmate-parent` durable binding before the
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
-`bin/fm-harness.sh secondmate-snapshot` emits the resolved harness and optional model/effort tokens together; the scalar `secondmate-model` and `secondmate-effort` modes remain field views, and `config/crew-harness` stays a bare adapter name.
+`bin/fm-harness.sh secondmate-snapshot` emits dispatch presence, the resolved harness, and optional model/effort tokens from one bounded stable capture of `crew-dispatch.json`, `crew-harness`, and `secondmate-harness`; the scalar `secondmate-model` and `secondmate-effort` modes remain field views, and `config/crew-harness` stays a bare adapter name.
 For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
 For a local route, an explicit per-spawn `--harness` flag or positional named adapter starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
 Local and remote routes accept verified named adapters only and refuse opaque raw launch commands before provisioning.

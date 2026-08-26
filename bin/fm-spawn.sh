@@ -98,10 +98,10 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
-#   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
-#   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
-#   spawns require an explicit harness so firstmate cannot silently skip dispatch
-#   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
+#   With no harness arg, a crewmate/scout spawn resolves dispatch presence and the
+#   CREW harness from one stable snapshot. When config/crew-dispatch.json exists,
+#   crewmate/scout spawns require an explicit harness so firstmate cannot silently
+#   skip dispatch profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
@@ -764,11 +764,11 @@ SPAWN_CONFIG_EFFORT=
 SPAWN_HARNESS_SOURCE=
 SPAWN_SELECTION_MODE=
 SPAWN_DISPATCH_ACTIVE=0
-[ -f "$CONFIG/crew-dispatch.json" ] && SPAWN_DISPATCH_ACTIVE=1
 
 spawn_load_harness_snapshot() {
   local mode=$1 snapshot line key value
-  local harness= model= effort= harness_seen=0 model_seen=0 effort_seen=0
+  local dispatch_active= harness= model= effort=
+  local dispatch_seen=0 harness_seen=0 model_seen=0 effort_seen=0
   snapshot=$("$FM_ROOT/bin/fm-harness.sh" "$mode-snapshot") || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -776,6 +776,11 @@ spawn_load_harness_snapshot() {
       *) return 1 ;;
     esac
     case "$key" in
+      dispatch_active)
+        [ "$dispatch_seen" -eq 0 ] || return 1
+        dispatch_active=$value
+        dispatch_seen=1
+        ;;
       harness)
         [ "$harness_seen" -eq 0 ] || return 1
         harness=$value
@@ -796,8 +801,14 @@ spawn_load_harness_snapshot() {
   done <<EOF
 $snapshot
 EOF
-  [ "$harness_seen" -eq 1 ] && [ "$model_seen" -eq 1 ] \
-    && [ "$effort_seen" -eq 1 ] && [ -n "$harness" ] || return 1
+  [ "$dispatch_seen" -eq 1 ] && [ "$harness_seen" -eq 1 ] \
+    && [ "$model_seen" -eq 1 ] && [ "$effort_seen" -eq 1 ] \
+    && [ -n "$harness" ] || return 1
+  case "$dispatch_active" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  SPAWN_DISPATCH_ACTIVE=$dispatch_active
   SPAWN_EFFECTIVE_HARNESS=$harness
   SPAWN_CONFIG_MODEL=$model
   SPAWN_CONFIG_EFFORT=$effort
@@ -826,18 +837,18 @@ elif [ -n "$ARG3" ]; then
   fi
 elif [ "$KIND" = secondmate ]; then
   if ! spawn_load_harness_snapshot secondmate; then
-    echo "error: could not resolve one complete secondmate harness snapshot" >&2
+    echo "error: could not resolve one complete secondmate dispatch and harness snapshot" >&2
     exit 1
   fi
   SPAWN_HARNESS_SOURCE='config/secondmate-harness (falling back to config/crew-harness)'
   SPAWN_SELECTION_MODE=configured
 else
-  if [ "$SPAWN_DISPATCH_ACTIVE" -eq 1 ]; then
-    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+  if ! spawn_load_harness_snapshot crew; then
+    echo "error: could not resolve one complete crew dispatch and harness snapshot" >&2
     exit 1
   fi
-  if ! spawn_load_harness_snapshot crew; then
-    echo "error: could not resolve one complete crew harness snapshot" >&2
+  if [ "$SPAWN_DISPATCH_ACTIVE" -eq 1 ]; then
+    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
   fi
   SPAWN_HARNESS_SOURCE='config/crew-harness'

@@ -683,7 +683,7 @@ test_secondmate_relaunch_freezes_one_configured_profile_snapshot() {
 printf '%s\n' "${1:-own}" >> "$FM_HARNESS_SNAPSHOT_LOG"
 case "${1:-}" in
   secondmate-snapshot)
-    printf 'harness=codex\nmodel=snapshot-model\neffort=high\n'
+    printf 'dispatch_active=0\nharness=codex\nmodel=snapshot-model\neffort=high\n'
     ;;
   secondmate) printf 'claude\n' ;;
   secondmate-model) printf 'mixed-model\n' ;;
