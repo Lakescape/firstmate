@@ -370,14 +370,7 @@ test_omp_token_is_not_normalized_to_pi() {
     CURSOR_AGENT=1 FM_OMP_HARNESS=1 "$ROOT/bin/fm-harness.sh")
   [ "$out" = cursor ] || fail "an uncleared CURSOR_AGENT must still outrank omp, got '$out'"
 
-  # Liveness classifies the exact process name only, never a substring.
-  out=$(fm_backend_tmux_classify_process_name /usr/local/bin/omp)
-  [ "$out" = agent ] || fail "exact process name omp must classify agent, got '$out'"
-  out=$(fm_backend_tmux_classify_process_name /bin/compinit)
-  [ "$out" != agent ] || fail "compinit must not classify as an omp agent"
-  out=$(fm_backend_tmux_classify_process_name /usr/bin/composer)
-  [ "$out" != agent ] || fail "composer must not classify as an omp agent"
-  pass "omp is recognized as its own token, never normalized to pi, and matched exactly for liveness"
+  pass "omp is recognized only through its configured token or First Mate-owned marker and is never normalized to pi"
 }
 
 test_omp_is_unreachable_without_explicit_selection() {

@@ -860,7 +860,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
 }
 
 test_orca_recovery_publication_never_replaces_a_racing_task_record() {
-  local proj wt data state config id out status
+  local proj wt data state config id out status stranded_worktree
   id="orcarecoverycollisionz2"
   proj="$TMP_ROOT/recovery-collision-project"
   wt="$TMP_ROOT/recovery-collision-wt"
@@ -870,10 +870,11 @@ test_orca_recovery_publication_never_replaces_a_racing_task_record() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
+  stranded_worktree=verified-nonexistent-worktree-id-recovery-collision
   orca_case recovery-collision
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-recovery-collision"}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-recovery-collision","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$stranded_worktree" "$wt" > "$RESP/3.out"
   printf '1\n' > "$RESP/4.exit"
   printf '1\n' > "$RESP/5.exit"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -885,13 +886,17 @@ test_orca_recovery_publication_never_replaces_a_racing_task_record() {
   [ "$status" -ne 0 ] || fail "terminal creation and cleanup failure must abort the spawn"
   assert_contains "$out" "could not publish recovery metadata" \
     "a recovery collision must be surfaced"
+  assert_contains "$out" "$stranded_worktree" \
+    "a recovery collision must surface the exact surviving worktree identity"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$stranded_worktree"$'\x1f''--force'$'\x1f''--json' \
+    "the collision case did not exercise a failed worktree cleanup"
   [ "$(cat "$state/$id.meta")" = "sentinel=original" ] \
     || fail "recovery publication replaced the racing durable task record"
-  pass "Orca recovery publication never replaces a racing task record"
+  pass "Orca recovery collision surfaces a survivor without replacing a racing task record"
 }
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
-  local proj wt data state config id out status log_text terminal_close_count worktree_remove_count
+  local proj wt data state config id out status log_text terminal_close_count worktree_remove_count terminal_id worktree_id
   id="orcametafailz9"
   proj="$TMP_ROOT/meta-fail-project"
   wt="$TMP_ROOT/meta-fail-wt"
@@ -901,12 +906,13 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
   printf 'brief\n' > "$data/$id/brief.md"
+  terminal_id=verified-nonexistent-terminal-meta-fail
+  worktree_id=verified-nonexistent-worktree-id-meta-fail
   orca_case meta-fail
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-meta-fail"}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-meta-fail","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"handle":"term-meta-fail"}}}\n' > "$RESP/4.out"
-  printf '1\n' > "$RESP/6.exit"
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$worktree_id" "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"%s"}}}\n' "$terminal_id" > "$RESP/4.out"
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ORCA_COLLISION_META="$state/$id.meta" FM_ORCA_COLLISION_ON='worktree create' \
@@ -916,15 +922,15 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
   assert_contains "$out" "failed to publish Orca metadata" "spawn should fail at metadata publication"
-  assert_contains "$out" "could not publish recovery metadata" "spawn should report an unwritable recovery record"
+  assert_not_contains "$out" "could not publish recovery metadata" "successful abort cleanup should not report a stranded allocation"
   log_text=$(cat "$LOG")
-  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"$terminal_id"$'\x1f''--json' \
     "Orca spawn should close the recorded terminal when a later abort occurs"
-  assert_contains "$log_text" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
+  assert_contains "$log_text" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the recorded worktree when a later abort occurs"
-  terminal_close_count=$(printf '%s\n' "$log_text" | grep -c $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json')
+  terminal_close_count=$(printf '%s\n' "$log_text" | grep -c $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"$terminal_id"$'\x1f''--json')
   [ "$terminal_close_count" -eq 1 ] || fail "metadata-publication abort should close the Orca terminal exactly once"
-  worktree_remove_count=$(printf '%s\n' "$log_text" | grep -c $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json')
+  worktree_remove_count=$(printf '%s\n' "$log_text" | grep -c $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--force'$'\x1f''--json')
   [ "$worktree_remove_count" -eq 1 ] || fail "metadata-publication abort should remove the Orca worktree exactly once"
   assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''send' \
     "metadata-publication abort must happen before any harness launch is sent"
@@ -1543,21 +1549,64 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   pass "fm-teardown.sh backend=orca: releases terminal/worktree when path is absent"
 }
 
-test_teardown_preserves_metadata_when_orca_remove_error_json() {
-  local proj wt data state config id out rc neutral
+test_live_teardown_preserves_orca_survivors_when_close_fails() {
+  local proj wt data state config id out rc neutral terminal_id worktree_id meta_before log_text
+  id="orcacloseerrz3"
+  proj="$TMP_ROOT/close-error-project"
+  wt="$TMP_ROOT/close-error-wt"
+  data="$TMP_ROOT/close-error-data"
+  state="$TMP_ROOT/close-error-state"
+  config="$TMP_ROOT/close-error-config"
+  terminal_id=verified-nonexistent-terminal-live-close-error
+  worktree_id=verified-nonexistent-worktree-id-live-close-error
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=$terminal_id" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$worktree_id" \
+    "decisions_reviewed=1" "decision_keys="
+  meta_before=$(cat "$state/$id.meta")
+  orca_case close-error-teardown
+  printf '{"ok":false,"error":{"code":"terminal_close_failed","message":"terminal close failed"}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/1.exit"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca teardown should fail when strict terminal close fails"
+  assert_contains "$out" "could not close Orca terminal $terminal_id" \
+    "strict close failure did not explain that the terminal identity was retained"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"$terminal_id"$'\x1f''--json' \
+    "live teardown did not close the exact recorded terminal"
+  assert_not_contains "$log_text" $'orca\x1f''worktree'$'\x1f''rm' \
+    "live teardown removed a worktree after terminal close failed"
+  [ "$(cat "$state/$id.meta")" = "$meta_before" ] \
+    || fail "terminal close failure changed the durable survivor identities"
+  pass "fm-teardown.sh backend=orca: strict close failure preserves every live identity"
+}
+
+test_live_teardown_persists_orca_cleanup_transitions() {
+  local proj wt data state config id out rc neutral terminal_id worktree_id log_text
   id="orcaremoveerrz2"
   proj="$TMP_ROOT/remove-error-project"
   wt="$TMP_ROOT/remove-error-wt"
   data="$TMP_ROOT/remove-error-data"
   state="$TMP_ROOT/remove-error-state"
   config="$TMP_ROOT/remove-error-config"
+  terminal_id=verified-nonexistent-terminal-remove-error
+  worktree_id=verified-nonexistent-worktree-id-remove-error
   mkdir -p "$data/$id" "$state" "$config"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-remove-error" "worktree=$wt" "project=$proj" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=$terminal_id" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
-    "backend=orca" "orca_worktree_id=wt-remove-error" \
+    "backend=orca" "orca_worktree_id=$worktree_id" \
     "decisions_reviewed=1" "decision_keys="
   orca_case remove-error-teardown
   printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
@@ -1572,7 +1621,42 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   [ "$rc" -ne 0 ] || fail "Orca teardown should fail when worktree removal returns ok:false JSON"
   assert_contains "$out" "worktree not removed" "teardown should surface the Orca removal error"
   assert_present "$state/$id.meta" "failed Orca removal should preserve task metadata"
-  pass "fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON"
+  assert_no_grep '^terminal=' "$state/$id.meta" "successful terminal close was not retired before worktree removal"
+  assert_grep 'orca_allocation=worktree-only' "$state/$id.meta" "live cleanup did not persist its surviving worktree state"
+  assert_grep "orca_worktree_id=$worktree_id" "$state/$id.meta" "failed removal lost the exact worktree identity"
+  assert_grep "worktree=$wt" "$state/$id.meta" "failed removal lost the exact worktree path"
+
+  orca_case remove-success-later-failure
+  printf 'malformed\n' > "$state/.status-presentation-cursor"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca teardown should retain cleanup-complete state after later cleanup fails"
+  log_text=$(cat "$LOG")
+  assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close' \
+    "worktree-only retry repeated a completed terminal close"
+  assert_contains "$log_text" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$worktree_id"$'\x1f''--force'$'\x1f''--json' \
+    "worktree-only retry did not remove the exact surviving worktree"
+  assert_grep 'orca_allocation=cleanup-complete' "$state/$id.meta" \
+    "successful worktree cleanup was not persisted before a later failure"
+  assert_no_grep '^terminal=' "$state/$id.meta" "cleanup-complete state retained the closed terminal"
+  assert_no_grep '^orca_worktree_id=' "$state/$id.meta" "cleanup-complete state retained the removed worktree identity"
+  assert_grep '^worktree=$' "$state/$id.meta" "cleanup-complete state lost its empty worktree field"
+
+  rm -f "$state/.status-presentation-cursor"
+  orca_case remove-success-finish
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  expect_code 0 $? "cleanup-complete live teardown retry should succeed"$'\n'"$out"
+  [ ! -s "$LOG" ] || fail "cleanup-complete live teardown retry repeated Orca cleanup"
+  assert_absent "$state/$id.meta" "successful cleanup-complete retry retained task metadata"
+  pass "fm-teardown.sh backend=orca: live cleanup persists each durable transition"
 }
 
 test_recovery_teardown_retires_closed_terminal_before_worktree_retry() {
@@ -1985,6 +2069,59 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
   pass "fm-teardown.sh --force: removes Orca secondmate children through Orca"
 }
 
+test_secondmate_force_teardown_preserves_orca_child_when_close_fails() {
+  local home subhome childproj childwt child_id neutral out rc terminal_id worktree_id log_text
+  home="$TMP_ROOT/orca-child-close-error-parent"
+  subhome="$TMP_ROOT/orca-child-close-error-secondmate"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/orca-child-close-error-worktree"
+  child_id="orcachildcloseerrz7"
+  terminal_id=verified-nonexistent-terminal-child-close-error
+  worktree_id=verified-nonexistent-worktree-id-child-close-error
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - Orca child close retention (home: $subhome; scope: orca cleanup; projects: alpha; added 2026-07-03)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/$child_id.meta" \
+    "window=fm-$child_id" "endpoint_task_id=$child_id" \
+    "terminal=$terminal_id" "worktree=$childwt" "project=$childproj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=$worktree_id"
+  orca_case secondmate-child-close-error
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$worktree_id" "$childwt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$worktree_id" "$childwt" > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"terminal_close_failed","message":"terminal close failed"}}\n' > "$RESP/3.out"
+  printf '1\n' > "$RESP/3.exit"
+  add_tmux_fake "$FB"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown should fail when an Orca child terminal close fails"
+  assert_contains "$out" "could not close Orca terminal $terminal_id" \
+    "forced child close failure did not explain durable identity retention"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f'"$terminal_id"$'\x1f''--json' \
+    "forced child cleanup did not close the exact recorded terminal"
+  assert_not_contains "$log_text" $'orca\x1f''worktree'$'\x1f''rm' \
+    "forced child cleanup removed a worktree after terminal close failed"
+  assert_present "$home/state/domain.meta" "forced child close failure removed parent metadata"
+  assert_grep "terminal=$terminal_id" "$subhome/state/$child_id.meta" \
+    "forced child close failure lost the exact terminal identity"
+  assert_grep "orca_worktree_id=$worktree_id" "$subhome/state/$child_id.meta" \
+    "forced child close failure lost the exact worktree identity"
+  assert_no_grep '^orca_allocation=' "$subhome/state/$child_id.meta" \
+    "forced child close failure advanced cleanup state without closing the terminal"
+  pass "fm-teardown.sh --force: failed Orca child close preserves every identity"
+}
+
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
   local home subhome childproj childwt other_wt child_id neutral out rc
   home="$TMP_ROOT/orca-child-mismatch-parent"
@@ -2128,7 +2265,8 @@ test_endpoint_validation_refuses_composite_orca_path_mismatch
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
-test_teardown_preserves_metadata_when_orca_remove_error_json
+test_live_teardown_preserves_orca_survivors_when_close_fails
+test_live_teardown_persists_orca_cleanup_transitions
 test_recovery_teardown_retires_closed_terminal_before_worktree_retry
 test_teardown_uses_only_validated_orca_identities
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
@@ -2139,5 +2277,6 @@ test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
+test_secondmate_force_teardown_preserves_orca_child_when_close_fails
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child

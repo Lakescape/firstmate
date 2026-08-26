@@ -39,6 +39,13 @@ The supervision knowledge lives here: busy state, exit command, interrupt, dialo
 Each adapter's `Busy state` row names only which semantic source that harness uses; `bin/fm-busy-lib.sh` owns the contract itself, including verdicts, source attribution, and the verification gates that keep an unverified harness at unknown.
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
+The named launch templates remain available as adapter mechanics, but production
+spawn currently refuses every one before mutation because no reviewed portable
+executable-identity broker can bind trusted bytes through final execution on both
+macOS and Linux. A harness token, PATH result, path, basename, symlink target,
+wrapper, or renamed executable is not adapter identity. Keep this fail-closed
+boundary until a separately reviewed native broker and repository-owned release
+receipts establish that identity without weakening OMP dormancy.
 If `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, tell the captain under `AGENTS.md` section 9 that the requested worker runtime is not verified yet, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime before future use.
 Do not pause current work for that future-verification choice, and never launch an unverified adapter.
 If the captain asks for a new harness, propose verifying it first: add a named, fail-closed adapter boundary for a trivial supervised trial, confirm every fact empirically, then record the mechanics in `fm-spawn`, its semantic busy source and trust gate in `bin/fm-busy-lib.sh`, any new composer shape, prompt glyph, or idle placeholder in `bin/fm-composer-lib.sh`'s shared screen classifier (the ONE fleet-wide owner of every composer shape and the `empty`/`pending`/`pending-unproven`/`unknown` decision - teaching it there gives every backend the shape in the same commit, and no adapter may carry its own copy), the tmux agent-process liveness classification in `bin/backends/tmux.sh` when the harness can launch a secondmate, and the verified knowledge here.
@@ -50,7 +57,7 @@ Within the Pi family, only the exact launch-boundary marker `FM_PI_HARNESS=pi-si
 `bin/fm-harness.sh crew` resolves the effective crewmate harness from `config/crew-harness` (absent or `default` -> own).
 `bin/fm-harness.sh secondmate` resolves the secondmate-launch harness through the chain `config/secondmate-harness` -> `config/crew-harness` -> own, so an unset `config/secondmate-harness` matches the crew harness.
 `bin/fm-harness.sh crew-snapshot` and `secondmate-snapshot` emit dispatch presence, harness, model, and effort from one bounded stable multi-file capture; they retry when any captured input changes and fail closed without emitting a partial tuple when no stable capture is available. The scalar modes remain read-only views for callers that need one field.
-`bin/fm-spawn.sh` consumes exactly one matching snapshot for each configured crewmate, scout, or secondmate launch, freezes all four fields together before mutation, and uses that immutable tuple through dispatch gating, adapter selection, template construction, dormancy checks, and final submission; an explicit per-spawn harness arg overrides configuration without consuming ambient config.
+`bin/fm-spawn.sh` consumes exactly one matching snapshot for each configured crewmate, scout, or secondmate launch, freezes all four fields together before mutation, and uses that immutable tuple through dispatch gating, adapter selection, identity refusal, template construction, dormancy checks, and final submission; an explicit per-spawn harness arg overrides configuration without consuming ambient config.
 For a secondmate relaunch without an explicit harness, `bin/fm-control.sh` consumes the same single snapshot before any checkpoint or stop.
 On `unknown`, ask the captain instead of guessing.
 A captain override always beats detection.

@@ -130,6 +130,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-harness-snapshot-lib.sh
+. "$SCRIPT_DIR/fm-harness-snapshot-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -607,51 +609,12 @@ relaunch_rollback() {
 }
 
 load_secondmate_relaunch_snapshot() {
-  local snapshot line key value
-  local dispatch_active= harness= model= effort=
-  local dispatch_seen=0 harness_seen=0 model_seen=0 effort_seen=0
+  local snapshot
   snapshot=$("$SCRIPT_DIR/fm-harness.sh" secondmate-snapshot 2>/dev/null) || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      *=*) key=${line%%=*}; value=${line#*=} ;;
-      *) return 1 ;;
-    esac
-    case "$key" in
-      dispatch_active)
-        [ "$dispatch_seen" -eq 0 ] || return 1
-        dispatch_active=$value
-        dispatch_seen=1
-        ;;
-      harness)
-        [ "$harness_seen" -eq 0 ] || return 1
-        harness=$value
-        harness_seen=1
-        ;;
-      model)
-        [ "$model_seen" -eq 0 ] || return 1
-        model=$value
-        model_seen=1
-        ;;
-      effort)
-        [ "$effort_seen" -eq 0 ] || return 1
-        effort=$value
-        effort_seen=1
-        ;;
-      *) return 1 ;;
-    esac
-  done <<EOF
-$snapshot
-EOF
-  [ "$dispatch_seen" -eq 1 ] && [ "$harness_seen" -eq 1 ] \
-    && [ "$model_seen" -eq 1 ] && [ "$effort_seen" -eq 1 ] \
-    && [ -n "$harness" ] || return 1
-  case "$dispatch_active" in
-    0|1) ;;
-    *) return 1 ;;
-  esac
-  CONFIG_HARNESS=$harness
-  CONFIG_MODEL=$model
-  CONFIG_EFFORT=$effort
+  fm_harness_snapshot_parse "$snapshot" || return 1
+  CONFIG_HARNESS=$FM_HARNESS_SNAPSHOT_HARNESS
+  CONFIG_MODEL=$FM_HARNESS_SNAPSHOT_MODEL
+  CONFIG_EFFORT=$FM_HARNESS_SNAPSHOT_EFFORT
 }
 
 resolve_relaunch_profile() {

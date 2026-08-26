@@ -1007,11 +1007,11 @@ The extension executes inside the signed CLI's own runtime, so a CLI upgrade can
 
 ## OMP candidate tool containment
 
-On 2026-08-24, source review invalidated the earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it is outside this candidate's no-session and no-network verification authority.
+The OMP adapter and manifest are review-only.
+They may report requested and rendered settings for exact `omp/17.2.9`, but those records are not effective consumer proof; effective configuration, fallback isolation, and effective tool construction remain explicitly unproven.
+No supported session-free consumer pinned to that exact artifact has been established.
 
-The installed exact-version bundle contains the compiled `omp/17.2.9` executable, provenance, and notice, but no importable matching SDK surface.
-The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove 17.2.9 behavior.
-The opt-in proof gate executes only a bounded `omp --version` identity probe, then fails closed before any agent session or provider startup:
+The opt-in proof gate performs only a bounded, non-launching `omp --version` self-report check and then fails closed before any agent session or provider startup:
 
 ```sh
 FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
@@ -1021,5 +1021,12 @@ FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 not ok - exact omp/17.2.9 has no available importable session-free configuration and tool consumer; candidate remains dormant
 ```
 
-No effective-configuration or effective-tool-registry containment proof is claimed.
-A matching importable session-free consumer and separately gated ATX-2170 interrupt, exit, and relaunch verification are independent mandatory prerequisites; OMP remains dormant until both pass, and neither substitutes for the other.
+That self-report does not establish immutable executable provenance or any effective consumer behavior.
+OMP remains hard dormant and non-runnable.
+Before dormancy can be reconsidered, all three independent mandatory prerequisites must pass:
+
+1. immutable executable provenance and exact `omp/17.2.9` version binding;
+2. supported session-free consumer proof pinned to that same exact artifact, covering effective configuration, fallback isolation, and effective tool construction; and
+3. separately gated ATX-2170 First Mate interrupt, exit, and relaunch verification.
+
+No prerequisite substitutes for another.

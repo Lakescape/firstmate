@@ -53,6 +53,7 @@ export PATH
 # the executable identity, which is exactly the signal under test.
 ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
 ln -s "$SLEEP_BIN" "$LAB/bin/pi"
+ln -s "$SLEEP_BIN" "$LAB/bin/omp"
 ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
@@ -171,6 +172,11 @@ for decoy in musescore amuse muse-binary muse-bind; do
     || fail "'$decoy' merely contains 'muse' and must not classify as a live agent pane"
 done
 pass "tmux liveness: unrelated muse-containing command names stay ambiguous"
+
+new_window omp-unverified "$LAB/bin/omp" 900
+wait_for_state "$SESSION:omp-unverified" ambiguous \
+  || fail "an unverified OMP process name must stay ambiguous"
+pass "tmux liveness: an unverified OMP process name stays ambiguous"
 
 # --- a version name blinds one source ---------------------------------------
 # Giving a genuine harness-named executable the version-string argv[0] that

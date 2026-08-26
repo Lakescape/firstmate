@@ -102,10 +102,6 @@ detect_own() {
       # prefix rather than any exact name. Deliberately anchored, never *muse*, so
       # unrelated commands (musescore, amuse) cannot be misread as this harness.
       muse|muse-bin-*) echo muse; return ;;
-      # Anchored, never *omp*: `omp` is a substring of ordinary shell machinery
-      # (compinit, compdef, composer). Matched before the Pi family below and
-      # kept as its own token so this Pi fork is never normalized to pi.
-      omp) echo omp; return ;;
       pi-signed) echo pi; return ;;
       pi) echo pi; return ;;
       node*|python*)

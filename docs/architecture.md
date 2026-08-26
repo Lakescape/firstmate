@@ -249,7 +249,11 @@ A bare harness line remains harness-only, so existing `config/secondmate-harness
 When the harness token is unset or `default`, launch falls back to `config/crew-harness`, then to the primary's own harness, and the model and effort tokens are ignored.
 Those optional tokens, the fallback crew harness, and crew-dispatch presence are resolved in one immutable stable multi-file snapshot on every configured secondmate spawn or respawn and are overridden by explicit per-spawn `--model` or `--effort` flags.
 For a local route, an explicit per-spawn named harness does not inherit model or effort tokens from `config/secondmate-harness`.
-Local and remote routes accept verified named adapters only and reject opaque raw launch commands before provisioning.
+Local and remote routes reject opaque raw launch commands and every named adapter
+that lacks a reviewed immutable executable binding before provisioning. The
+current cross-platform shell boundary cannot preserve that identity through
+final execution, so the named templates remain production-dormant until a native
+broker and repository-owned release receipts are reviewed.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the complete inherited-local-material allowlist and propagation contract.
