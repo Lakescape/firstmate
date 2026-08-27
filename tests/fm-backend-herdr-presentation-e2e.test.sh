@@ -12,14 +12,29 @@ HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+resolve_executable() {
+  local path=$1 directory target
+  case "$path" in /*) ;; *) path=$(pwd -P)/$path ;; esac
+  while [ -L "$path" ]; do
+    directory=$(CDPATH='' cd -- "$(dirname -- "$path")" && pwd -P) || return 1
+    target=$(/usr/bin/readlink "$path") || return 1
+    case "$target" in /*) path=$target ;; *) path=$directory/$target ;; esac
+  done
+  directory=$(CDPATH='' cd -- "$(dirname -- "$path")" && pwd -P) || return 1
+  printf '%s/%s\n' "$directory" "$(basename -- "$path")"
+}
+
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found"; exit 0; }
 [ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
 
-REAL_HERDR=$(command -v herdr)
-REAL_TREEHOUSE=$(command -v treehouse)
+REAL_HERDR=$(resolve_executable "$(command -v herdr)") \
+  || { echo "skip: could not resolve herdr"; exit 0; }
+REAL_TREEHOUSE=$(resolve_executable "$(command -v treehouse)") \
+  || { echo "skip: could not resolve treehouse"; exit 0; }
 HERDR_ORIGINAL_PATH=$PATH
+exec 7< "$REAL_HERDR"
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-presentation.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
 AGENT_BIN="$TMP_ROOT/agent-bin"
@@ -41,17 +56,39 @@ chmod +x "$AGENT_BIN/claude"
 : > "$FOCUS_AUDIT_LOG"
 REAL_MOVER="$ROOT/bin/backends/herdr-workspace-move.py"
 export REAL_HERDR REAL_TREEHOUSE REAL_MOVER HERDR_CALL_LOG TREEHOUSE_CALL_LOG MOVE_CALL_LOG FOCUS_AUDIT_LOG HERDR_ORIGINAL_PATH HERDR_LAB_HELPER
+export FM_HERDR_PRESENTATION_REAL_FD=7
 export ACTIVE_SEEDED_CONTROL POST_CREATE_ABORT_CONTROL TMP_ROOT
 
 # Log every production-adapter call, remove its already-validated trailing
-# session flag, and send the operation through the lab helper so that helper
-# remains the sole process which appends the real trailing session flag.
-# The adapter's deliberately session-independent version read cannot pass the
-# helper's leading-option guard, so the wrapper sends only that read straight
-# to the absolute real binary with the same explicit trailing lab session.
+# session flag, and dispatch the descriptor-bound real binary with the same
+# explicit trailing lab session.
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
+bound_file_signature() {
+  if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then
+    /usr/bin/stat -f '%i:%z:%HT' "$1" 2>/dev/null
+  else
+    /usr/bin/stat -L -c '%i:%s:%F' "$1" 2>/dev/null
+  fi
+}
+bound_fd_matches_path() {
+  local fd=$1 path=$2 fd_signature path_signature
+  [ -r "/dev/fd/$fd" ] && [ -f "$path" ] || return 1
+  fd_signature=$(bound_file_signature "/dev/fd/$fd") || return 1
+  path_signature=$(bound_file_signature "$path") || return 1
+  [ "$fd_signature" = "$path_signature" ]
+}
+bound_herdr() {
+  [ "${FM_HERDR_PRESENTATION_REAL_FD:-}" = 7 ] \
+    && bound_fd_matches_path 7 "${REAL_HERDR:?}" || return 1
+  /dev/fd/7 "$@" --session "${HERDR_LAB_SESSION:?}"
+}
+bound_jq() {
+  [ "${FM_SPAWN_TEST_NO_SUBMIT_JQ_FD:-}" = 5 ] \
+    && bound_fd_matches_path 5 "${FM_SPAWN_TEST_NO_SUBMIT_JQ_PATH:?}" || return 1
+  /dev/fd/5 "$@"
+}
 {
   first=1
   for arg in "$@"; do
@@ -78,13 +115,10 @@ for arg in "$@"; do
       ;;
   esac
 done
-if [ "${1:-}" = --version ]; then
-  exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" "$@" --session "$HERDR_LAB_SESSION"
-fi
 focus_snapshot() {
   local list row workspace tab tabs
-  list=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace list) || return 1
-  row=$(printf '%s' "$list" | jq -r '
+  list=$(bound_herdr workspace list) || return 1
+  row=$(printf '%s' "$list" | bound_jq -r '
     [.result.workspaces[]? | select(.focused == true)]
     | select(length == 1)
     | .[0]
@@ -95,8 +129,8 @@ focus_snapshot() {
   [ -n "$row" ] || return 1
   workspace=${row%%$'\t'*}
   tab=${row#*$'\t'}
-  tabs=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab list --workspace "$workspace") || return 1
-  printf '%s' "$tabs" | jq -e --arg tab "$tab" '
+  tabs=$(bound_herdr tab list --workspace "$workspace") || return 1
+  printf '%s' "$tabs" | bound_jq -e --arg tab "$tab" '
     ([.result.tabs[]? | select(.focused == true)] | length) == 1
     and ([.result.tabs[]? | select(.focused == true)][0].tab_id == $tab)
   ' >/dev/null 2>&1 || return 1
@@ -124,7 +158,7 @@ if [ "${1:-} ${2:-}" = "workspace list" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ]; th
   elif [ "$stage" = post-task-snapshot ]; then
     seeded_tab=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-tab")
     inject_before=$(focus_snapshot || printf ambiguous/ambiguous)
-    env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab focus "$seeded_tab" >/dev/null
+    bound_herdr tab focus "$seeded_tab" >/dev/null
     inject_after=$(focus_snapshot || printf ambiguous/ambiguous)
     printf 'active-seeded-inject\t%s\t%s\t%s\n' "$inject_before" "$inject_after" "$seeded_tab" >> "$FOCUS_AUDIT_LOG"
     printf '%s\n' injected > "$ACTIVE_SEEDED_CONTROL/stage"
@@ -148,7 +182,7 @@ if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
 fi
 before=
 [ -z "$mutation" ] || before=$(focus_snapshot || printf ambiguous/ambiguous)
-if out=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"); then
+if out=$(bound_herdr "$@"); then
   status=0
 else
   status=$?
@@ -157,27 +191,27 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
   case "$label" in
     $'└ active-seeded · p:'*)
       mkdir -p "$ACTIVE_SEEDED_CONTROL"
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$ACTIVE_SEEDED_CONTROL/workspace"
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.tab.tab_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-tab"
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-pane"
+      printf '%s\n' "$(printf '%s' "$out" | bound_jq -r '.result.workspace.workspace_id')" > "$ACTIVE_SEEDED_CONTROL/workspace"
+      printf '%s\n' "$(printf '%s' "$out" | bound_jq -r '.result.tab.tab_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-tab"
+      printf '%s\n' "$(printf '%s' "$out" | bound_jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/seeded-pane"
       ;;
     $'└ abort-a · p:'*|$'└ abort-b · p:'*)
       task=${label#$'└ '}; task=${task%% *}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
+      printf '%s\n' "$(printf '%s' "$out" | bound_jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
       ;;
   esac
 fi
 if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
   case "$label" in
     fm-active-seeded)
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
+      printf '%s\n' "$(printf '%s' "$out" | bound_jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
       printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
       ;;
     fm-abort-a|fm-abort-b)
       task=${label#fm-}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
+      printf '%s\n' "$(printf '%s' "$out" | bound_jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
       ;;
   esac
 fi
@@ -185,7 +219,7 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
   for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
     [ -d "$task_dir" ] || continue
     [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
-    out=$(printf '%s' "$out" | jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
+    out=$(printf '%s' "$out" | bound_jq --arg cwd "$POST_CREATE_ABORT_CONTROL/not-a-worktree" '.result.pane.foreground_cwd = $cwd')
     break
   done
 fi
@@ -222,10 +256,34 @@ SH
 cat > "$FAKEBIN/herdr-workspace-mover" <<'SH'
 #!/usr/bin/env bash
 set -u
+bound_file_signature() {
+  if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then
+    /usr/bin/stat -f '%i:%z:%HT' "$1" 2>/dev/null
+  else
+    /usr/bin/stat -L -c '%i:%s:%F' "$1" 2>/dev/null
+  fi
+}
+bound_fd_matches_path() {
+  local fd=$1 path=$2 fd_signature path_signature
+  [ -r "/dev/fd/$fd" ] && [ -f "$path" ] || return 1
+  fd_signature=$(bound_file_signature "/dev/fd/$fd") || return 1
+  path_signature=$(bound_file_signature "$path") || return 1
+  [ "$fd_signature" = "$path_signature" ]
+}
+bound_herdr() {
+  [ "${FM_HERDR_PRESENTATION_REAL_FD:-}" = 7 ] \
+    && bound_fd_matches_path 7 "${REAL_HERDR:?}" || return 1
+  /dev/fd/7 "$@" --session "${HERDR_LAB_SESSION:?}"
+}
+bound_jq() {
+  [ "${FM_SPAWN_TEST_NO_SUBMIT_JQ_FD:-}" = 5 ] \
+    && bound_fd_matches_path 5 "${FM_SPAWN_TEST_NO_SUBMIT_JQ_PATH:?}" || return 1
+  /dev/fd/5 "$@"
+}
 focus_snapshot() {
   local list row workspace tab tabs
-  list=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" workspace list) || return 1
-  row=$(printf '%s' "$list" | jq -r '
+  list=$(bound_herdr workspace list) || return 1
+  row=$(printf '%s' "$list" | bound_jq -r '
     [.result.workspaces[]? | select(.focused == true)]
     | select(length == 1)
     | .[0]
@@ -235,8 +293,8 @@ focus_snapshot() {
   [ -n "$row" ] || return 1
   workspace=${row%%$'\t'*}
   tab=${row#*$'\t'}
-  tabs=$(env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" tab list --workspace "$workspace") || return 1
-  printf '%s' "$tabs" | jq -e --arg tab "$tab" '
+  tabs=$(bound_herdr tab list --workspace "$workspace") || return 1
+  printf '%s' "$tabs" | bound_jq -e --arg tab "$tab" '
     ([.result.tabs[]? | select(.focused == true)] | length) == 1
     and ([.result.tabs[]? | select(.focused == true)][0].tab_id == $tab)
   ' >/dev/null 2>&1 || return 1
@@ -272,9 +330,11 @@ HERDR_LAB_SESSION=$(PATH="$HERDR_ORIGINAL_PATH" \
 export HERDR_SESSION="$HERDR_LAB_SESSION" HERDR_LAB_SESSION
 LAB_READY=0
 RECORDED_WORKTREES=""
+NO_SUBMIT_WORKTREE_RECORDS="$TMP_ROOT/no-submit-worktrees"
+mkdir -p "$NO_SUBMIT_WORKTREE_RECORDS"
 LOCK_CONTENTION_OWNER_PID=
 cleanup_all() {
-  local wt
+  local record wt
   if [ -n "$LOCK_CONTENTION_OWNER_PID" ]; then
     kill "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
     wait "$LOCK_CONTENTION_OWNER_PID" 2>/dev/null || true
@@ -287,6 +347,12 @@ cleanup_all() {
   done <<EOF
 $RECORDED_WORKTREES
 EOF
+  for record in "$NO_SUBMIT_WORKTREE_RECORDS"/*; do
+    [ -f "$record" ] || continue
+    wt=$(cat "$record" 2>/dev/null || true)
+    [ -n "$wt" ] && [ -d "$wt" ] || continue
+    "$REAL_TREEHOUSE" return --force "$wt" >/dev/null 2>&1 || true
+  done
   if [ "$LAB_READY" -eq 1 ]; then
     PATH="$HERDR_ORIGINAL_PATH" \
       "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
@@ -388,10 +454,27 @@ make_project() {  # <dir>
   git -C "$dir" remote add origin "file://$dir.origin.git"
 }
 
+preallocate_spawn_worktree() {  # <project> <task-id>
+  local project=$1 id=$2 record holder
+  record=$(mktemp "$NO_SUBMIT_WORKTREE_RECORDS/$id.XXXXXX") || return 1
+  holder=$(basename "$record")
+  SPAWN_TEST_WORKTREE=$(cd "$project" && "$REAL_TREEHOUSE" get --lease --lease-holder "$holder") || {
+    rm -f "$record"
+    return 1
+  }
+  if [ -z "$SPAWN_TEST_WORKTREE" ] || [ ! -d "$SPAWN_TEST_WORKTREE" ]; then
+    rm -f "$record"
+    return 1
+  fi
+  printf '%s\n' "$SPAWN_TEST_WORKTREE" > "$record"
+}
+
 spawn_task() {  # <id> <home> <project>
   local id=$1 home=$2 project=$3
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$project" --harness claude --mode no-mistakes --yolo off --backend herdr
+  preallocate_spawn_worktree "$project" "$id" || return 1
+  FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$SPAWN_TEST_WORKTREE" \
+    "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$project" --harness claude --mode no-mistakes --yolo off --backend herdr
 }
 
 finish_concurrent_spawn() {  # <id> <status> <stdout> <stderr>
@@ -415,13 +498,13 @@ finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
 
 spawn_secondmate_task() {
   local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$home" --harness claude --secondmate --backend herdr
+  FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$home" --harness claude --secondmate --backend herdr
 }
 
 teardown_task() {  # <id> <home>
   local id=$1 home=$2
-  FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
     "$ROOT/bin/fm-teardown.sh" "$id" --force

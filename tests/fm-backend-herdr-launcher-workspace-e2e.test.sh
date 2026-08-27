@@ -65,6 +65,7 @@ HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-launcher-ws) || {
 export HERDR_SESSION="$HERDR_LAB_SESSION"
 
 WORKTREES=()
+SPAWN_TEST_WORKTREE=
 CLEANED=0
 # Idempotent: fail() cleans up before exiting and the EXIT trap fires after it,
 # so a second teardown would otherwise report the already-consumed fleet-state
@@ -97,6 +98,15 @@ make_scratch_project() {  # <dir>
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   git clone --quiet --bare "$dir" "$dir.origin.git"
   git -C "$dir" remote add origin "file://$dir.origin.git"
+}
+
+preallocate_spawn_worktree() {  # <project> <task-id>
+  local project=$1 id=$2
+  SPAWN_TEST_WORKTREE=$(cd "$project" && treehouse get --lease --lease-holder "fm-test-$id-$$-${#WORKTREES[@]}") \
+    || fail "could not preallocate inert worktree for $id"
+  [ -n "$SPAWN_TEST_WORKTREE" ] && [ -d "$SPAWN_TEST_WORKTREE" ] \
+    || fail "treehouse did not return an inert worktree for $id"
+  WORKTREES+=("$SPAWN_TEST_WORKTREE")
 }
 
 # make_workspace <label> -> "<workspace_id> <tab_id> <root_pane_id>"
@@ -134,17 +144,24 @@ SPAWN_OUT=; SPAWN_ERR=; SPAWN_RC=
 spawn_from_launcher() {
   local pane=$1 home=$2 id=$3 proj=$4
   shift 4
+  SPAWN_TEST_WORKTREE=
+  case " $* " in
+    *" --secondmate "*) ;;
+    *) preallocate_spawn_worktree "$proj" "$id" ;;
+  esac
   SPAWN_OUT="$TMP_ROOT/$id.out"; SPAWN_ERR="$TMP_ROOT/$id.err"
   if [ -n "$pane" ]; then
     env HERDR_ENV=1 HERDR_PANE_ID="$pane" HERDR_SESSION="$HERDR_LAB_SESSION" \
       HERDR_SOCKET_PATH="$LAB_SOCKET" \
       FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness claude --backend herdr "$@" \
+      FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$SPAWN_TEST_WORKTREE" \
+      "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$proj" --harness claude --backend herdr "$@" \
       >"$SPAWN_OUT" 2>"$SPAWN_ERR"
   else
     env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH HERDR_SESSION="$HERDR_LAB_SESSION" \
       FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness claude --backend herdr "$@" \
+      FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$SPAWN_TEST_WORKTREE" \
+      "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$proj" --harness claude --backend herdr "$@" \
       >"$SPAWN_OUT" 2>"$SPAWN_ERR"
   fi
   SPAWN_RC=$?
@@ -286,11 +303,14 @@ DUP_COUNT=$(lab workspace list 2>/dev/null | jq -r '[.result.workspaces[]? | sel
 [ "$DUP_COUNT" = 2 ] || fail "expected exactly two 'firstmate' workspaces, got $DUP_COUNT"
 WS_PRIMARY_TABS_BEFORE=$(tab_labels_of_workspace "$WS_PRIMARY")
 
+preallocate_spawn_worktree "$PROJ" dupC
+DUPC_TEST_WORKTREE=$SPAWN_TEST_WORKTREE
 cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
-  "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" --harness claude --mode no-mistakes --yolo off --backend herdr \\
+  FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$DUPC_TEST_WORKTREE" \\
+  "$ROOT/tests/fm-spawn-no-submit.sh" dupC "$PROJ" --harness claude --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
 SPAWN

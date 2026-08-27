@@ -167,7 +167,7 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#     __OMPBIN__   absolute path to the pinned omp executable resolved from PATH
+#     __OMPBIN__   requested candidate path placeholder; never resolved or invoked while dormant
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts
 #     __OMPAGENTDIR__ isolated OMP agent directory under the task temp root
 #     __OMPCWD__   isolated OMP project-settings directory under the task temp root
@@ -196,8 +196,9 @@
 # exit, and relaunch control. Neither mandatory gate substitutes for the other.
 # bin/fm-omp-candidate-artifacts.sh owns the candidate-only launch manifest,
 # isolated config, and extension.
-# Its executable must report exactly omp/17.2.9 through one portable,
-# hard-bounded five-second --version probe before launch preparation continues.
+# The requested candidate release remains pinned to omp/17.2.9 metadata. While
+# dormant, no candidate executable is resolved or invoked, so executable
+# provenance, installed version, and effective identity remain unproven.
 # omp also REQUIRES an explicit --model <provider>/<model> flag on every spawn.
 # The value is validated structurally (exactly one slash between two identifier
 # segments of letters, digits, dot, underscore, or dash), passed through
@@ -252,6 +253,11 @@
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
 
+if [ -n "${FM_SPAWN_TEST_NO_SUBMIT_FD:-}" ]; then
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  export PATH
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -267,6 +273,291 @@ esac
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+
+spawn_test_no_submit_file_signature() {
+  if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then
+    /usr/bin/stat -f '%i:%z:%HT' "$1" 2>/dev/null
+  else
+    /usr/bin/stat -L -c '%i:%s:%F' "$1" 2>/dev/null
+  fi
+}
+
+spawn_test_no_submit_fd_matches_path() {
+  local fd=$1 path=$2 fd_signature path_signature
+  [ -r "/dev/fd/$fd" ] && [ -f "$path" ] || return 1
+  fd_signature=$(spawn_test_no_submit_file_signature "/dev/fd/$fd") || return 1
+  path_signature=$(spawn_test_no_submit_file_signature "$path") || return 1
+  [ "$fd_signature" = "$path_signature" ]
+}
+
+SPAWN_TEST_NO_SUBMIT=0
+SPAWN_TEST_NO_SUBMIT_WORKTREE=
+if [ -n "${FM_SPAWN_TEST_NO_SUBMIT_FD:-}" ]; then
+  SPAWN_TEST_NO_SUBMIT_REQUESTED_ROOT=${FM_SPAWN_TEST_NO_SUBMIT_ROOT:-}
+  SPAWN_TEST_NO_SUBMIT_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
+  SPAWN_TEST_NO_SUBMIT_GIT_ROOT=$(/usr/bin/git -C "$SPAWN_TEST_NO_SUBMIT_ROOT" rev-parse --show-toplevel 2>/dev/null || true)
+  if [ "$FM_SPAWN_TEST_NO_SUBMIT_FD" != 9 ] \
+     || [ -z "$SPAWN_TEST_NO_SUBMIT_REQUESTED_ROOT" ] \
+     || [ ! -d "$SPAWN_TEST_NO_SUBMIT_REQUESTED_ROOT" ] \
+     || [ ! "$SPAWN_TEST_NO_SUBMIT_REQUESTED_ROOT" -ef "$SPAWN_TEST_NO_SUBMIT_ROOT" ] \
+     || [ -z "$SPAWN_TEST_NO_SUBMIT_GIT_ROOT" ] \
+     || [ ! "$SPAWN_TEST_NO_SUBMIT_GIT_ROOT" -ef "$SPAWN_TEST_NO_SUBMIT_ROOT" ] \
+     || ! spawn_test_no_submit_fd_matches_path \
+       9 "$SPAWN_TEST_NO_SUBMIT_ROOT/tests/fm-spawn-no-submit.sh" \
+     || [ ! "$SCRIPT_DIR/fm-spawn.sh" -ef "$SPAWN_TEST_NO_SUBMIT_ROOT/bin/fm-spawn.sh" ]; then
+    echo "error: invalid test no-submit capability" >&2
+    exit 1
+  fi
+  if [ -n "${FM_ROOT_OVERRIDE:-}" ] \
+     && { [ ! -d "$FM_ROOT_OVERRIDE" ] \
+       || [ ! "$FM_ROOT_OVERRIDE" -ef "$SPAWN_TEST_NO_SUBMIT_ROOT" ]; }; then
+    echo "error: test no-submit refuses an alternate executable root" >&2
+    exit 1
+  fi
+  SPAWN_TEST_NO_SUBMIT=1
+  readonly -f spawn_test_no_submit_file_signature spawn_test_no_submit_fd_matches_path
+  readonly PATH
+  FM_ROOT=$SPAWN_TEST_NO_SUBMIT_ROOT
+  FM_ROOT_OVERRIDE=$SPAWN_TEST_NO_SUBMIT_ROOT
+  export FM_ROOT_OVERRIDE
+  SPAWN_TEST_NO_SUBMIT_WORKTREE=${FM_SPAWN_TEST_NO_SUBMIT_WORKTREE:-}
+fi
+readonly SPAWN_TEST_NO_SUBMIT
+
+spawn_test_no_submit_read_stdin() {
+  local line raw=
+  while IFS= read -r line || [ -n "$line" ]; do
+    raw+=$line
+    raw+=$'\n'
+  done
+  printf '%s' "$raw"
+}
+
+spawn_test_no_submit_json_string() {
+  local raw=$1 field=$2 pattern alternate_pattern= value
+  case "$field" in
+    repo-id)
+      pattern='"repo"[[:space:]]*:[[:space:]]*\{[^{}]*"id"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+      ;;
+    worktree-id)
+      pattern='"worktree"[[:space:]]*:[[:space:]]*\{[^{}]*"id"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+      ;;
+    worktree-path)
+      pattern='"worktree"[[:space:]]*:[[:space:]]*\{[^{}]*"path"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+      ;;
+    terminal-handle|worktree-terminal-handle)
+      pattern='"result"[[:space:]]*:[[:space:]]*\{[[:space:]]*"terminal"[[:space:]]*:[[:space:]]*\{[^{}]*"handle"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+      alternate_pattern='"result"[[:space:]]*:[[:space:]]*\{[[:space:]]*"worktree"[[:space:]]*:[[:space:]]*\{[^{}]*\}[[:space:]]*,[[:space:]]*"terminal"[[:space:]]*:[[:space:]]*\{[^{}]*"handle"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+      ;;
+    error-code)
+      pattern='"error"[[:space:]]*:[[:space:]]*\{[^{}]*"code"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+      ;;
+    error-message)
+      pattern='"error"[[:space:]]*:[[:space:]]*\{[^{}]*"message"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+      ;;
+    *) return 1 ;;
+  esac
+  if [[ $raw =~ $pattern ]]; then
+    :
+  elif [ -n "$alternate_pattern" ] && [[ $raw =~ $alternate_pattern ]]; then
+    :
+  else
+    return 1
+  fi
+  value=${BASH_REMATCH[1]}
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+spawn_test_no_submit_json_false() {
+  local pattern='"ok"[[:space:]]*:[[:space:]]*false'
+  [[ $1 =~ $pattern ]]
+}
+
+spawn_test_no_submit_json_true() {
+  local pattern='"ok"[[:space:]]*:[[:space:]]*true'
+  [[ $1 =~ $pattern ]]
+}
+
+spawn_test_no_submit_orca_error() {
+  local raw=$1 message
+  message=$(spawn_test_no_submit_json_string "$raw" error-message 2>/dev/null) \
+    || message=$(spawn_test_no_submit_json_string "$raw" error-code 2>/dev/null) \
+    || message=
+  [ -z "$message" ] || printf '%s\n' "$message" >&2
+}
+
+spawn_test_no_submit_bind_orca_fake() {
+  local fake
+  [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] || return 1
+  fake="$SPAWN_TEST_NO_SUBMIT_ROOT/tests/fm-orca-fake.sh"
+  [ -f "$fake" ] && [ ! -L "$fake" ] && [ -x "$fake" ] || return 1
+  orca() {
+    /bin/bash "$SPAWN_TEST_NO_SUBMIT_ROOT/tests/fm-orca-fake.sh" "$@"
+  }
+  node() {
+    echo "error: test no-submit refuses external Node execution" >&2
+    return 97
+  }
+  fm_backend_orca_runtime_check() {
+    local out reachable_pattern state_pattern
+    fm_backend_orca_tool_check || return 1
+    out=$(orca status --json 2>/dev/null) || {
+      echo "error: backend=orca selected but 'orca status --json' failed; start Orca and wait for the runtime to be ready" >&2
+      return 1
+    }
+    if spawn_test_no_submit_json_false "$out"; then
+      spawn_test_no_submit_orca_error "$out"
+      echo "error: Orca runtime is not ready" >&2
+      return 1
+    fi
+    spawn_test_no_submit_json_true "$out" || {
+      echo "error: invalid Orca status JSON" >&2
+      return 1
+    }
+    reachable_pattern='"reachable"[[:space:]]*:[[:space:]]*true'
+    state_pattern='"state"[[:space:]]*:[[:space:]]*"ready"'
+    if [[ $out =~ $reachable_pattern ]] && [[ $out =~ $state_pattern ]]; then
+      return 0
+    fi
+    echo "error: backend=orca requires a ready Orca runtime" >&2
+    return 1
+  }
+  fm_backend_orca_json_get() {
+    local field=$1 raw
+    raw=$(spawn_test_no_submit_read_stdin)
+    if spawn_test_no_submit_json_false "$raw"; then
+      spawn_test_no_submit_orca_error "$raw"
+      return 2
+    fi
+    spawn_test_no_submit_json_true "$raw" || return 1
+    spawn_test_no_submit_json_string "$raw" "$field"
+  }
+  fm_backend_orca_json_ok() {
+    local raw
+    raw=$(spawn_test_no_submit_read_stdin)
+    [ -n "$raw" ] || return 0
+    if spawn_test_no_submit_json_false "$raw"; then
+      spawn_test_no_submit_orca_error "$raw"
+      return 2
+    fi
+    spawn_test_no_submit_json_true "$raw"
+  }
+  fm_backend_orca_json_cleanup_ok() {
+    local absent_code=$1 raw code
+    raw=$(spawn_test_no_submit_read_stdin)
+    [ -n "$raw" ] || return 0
+    if spawn_test_no_submit_json_false "$raw"; then
+      code=$(spawn_test_no_submit_json_string "$raw" error-code 2>/dev/null || true)
+      [ "$code" != "$absent_code" ] || return 3
+      spawn_test_no_submit_orca_error "$raw"
+      return 2
+    fi
+    spawn_test_no_submit_json_true "$raw"
+  }
+  readonly -f orca node fm_backend_orca_runtime_check fm_backend_orca_json_get \
+    fm_backend_orca_json_ok fm_backend_orca_json_cleanup_ok
+}
+
+spawn_test_no_submit_bind_tmux_fake() {
+  [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] || return 1
+  tmux() {
+    case "$*" in
+      *'#{pane_current_path}'*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; return 0 ;;
+      *'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_COMMAND:-zsh}"; return 0 ;;
+      *'#{pane_tty}'*) return 0 ;;
+      *'#{pane_id}'*) printf '%s\n' "${FM_SPAWN_TEST_NO_SUBMIT_TMUX_PANE_ID:-%1}"; return 0 ;;
+      *'#S'*) printf '%s\n' "${FM_SPAWN_TEST_NO_SUBMIT_TMUX_SESSION:-firstmate}"; return 0 ;;
+    esac
+    case "${1:-}" in
+      list-windows)
+        [ -z "${FM_FAKE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_WINDOW"
+        ;;
+      new-window) printf '%s\n' "${FM_SPAWN_TEST_NO_SUBMIT_TMUX_WINDOW_ID:-@1}" ;;
+      send-keys)
+        echo "error: test no-submit refuses tmux submission" >&2
+        return 97
+        ;;
+      has-session|new-session|set-window-option|kill-window|display-message) ;;
+      *)
+        echo "error: test no-submit refuses unsupported tmux operation '${1:-<empty>}'" >&2
+        return 97
+        ;;
+    esac
+  }
+  readonly -f tmux
+}
+
+spawn_test_no_submit_bind_herdr() {
+  local fd=${FM_SPAWN_TEST_NO_SUBMIT_HERDR_FD:-} path=${FM_SPAWN_TEST_NO_SUBMIT_HERDR_PATH:-}
+  local session=${FM_SPAWN_TEST_NO_SUBMIT_HERDR_SESSION:-}
+  local jq_fd=${FM_SPAWN_TEST_NO_SUBMIT_JQ_FD:-} jq_path=${FM_SPAWN_TEST_NO_SUBMIT_JQ_PATH:-}
+  [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] || return 1
+  [ "${FM_SPAWN_TEST_NO_SUBMIT_HERDR_AUTH_FD:-}" = 6 ] \
+    && spawn_test_no_submit_fd_matches_path \
+      6 "$SPAWN_TEST_NO_SUBMIT_ROOT/tests/herdr-test-safety.sh" \
+    && [ "$fd" = 4 ] && [ -n "$path" ] && [ "${path#/}" != "$path" ] \
+    && spawn_test_no_submit_fd_matches_path 4 "$path" && [ -x "$path" ] \
+    && [ "$jq_fd" = 5 ] && [ -n "$jq_path" ] && [ "${jq_path#/}" != "$jq_path" ] \
+    && spawn_test_no_submit_fd_matches_path 5 "$jq_path" && [ -x "$jq_path" ] || return 1
+  case "$session" in fm-lab-?*) ;; *) return 1 ;; esac
+  case "$session" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${HERDR_SESSION:-}" = "$session" ] || return 1
+  SPAWN_TEST_NO_SUBMIT_HERDR_PATH=$path
+  SPAWN_TEST_NO_SUBMIT_HERDR_SESSION=$session
+  SPAWN_TEST_NO_SUBMIT_JQ_PATH=$jq_path
+  HERDR_SESSION=$session
+  readonly SPAWN_TEST_NO_SUBMIT_HERDR_PATH SPAWN_TEST_NO_SUBMIT_HERDR_SESSION \
+    SPAWN_TEST_NO_SUBMIT_JQ_PATH
+  herdr() {
+    local arg pending= previous= saw=0
+    spawn_test_no_submit_fd_matches_path \
+      6 "$SPAWN_TEST_NO_SUBMIT_ROOT/tests/herdr-test-safety.sh" || return 1
+    spawn_test_no_submit_fd_matches_path 4 "$SPAWN_TEST_NO_SUBMIT_HERDR_PATH" || return 1
+    [ "${HERDR_SESSION:-}" = "$SPAWN_TEST_NO_SUBMIT_HERDR_SESSION" ] || return 1
+    for arg in "$@"; do
+      if [ -n "$pending" ]; then
+        [ "$arg" = "$SPAWN_TEST_NO_SUBMIT_HERDR_SESSION" ] || return 1
+        pending=
+        saw=$((saw + 1))
+        continue
+      fi
+      case "$arg" in
+        --session) pending=1 ;;
+        --session=*)
+          [ "${arg#--session=}" = "$SPAWN_TEST_NO_SUBMIT_HERDR_SESSION" ] || return 1
+          saw=$((saw + 1))
+          ;;
+        *)
+          if [ "$previous" = pane ]; then
+            case "$arg" in run|send-text|send-keys) return 97 ;; esac
+          fi
+          previous=$arg
+          ;;
+      esac
+    done
+    [ -z "$pending" ] && [ "$saw" -le 1 ] || return 1
+    if [ "$saw" -eq 0 ]; then
+      /dev/fd/4 "$@" --session "$SPAWN_TEST_NO_SUBMIT_HERDR_SESSION"
+    else
+      /dev/fd/4 "$@"
+    fi
+  }
+  jq() {
+    spawn_test_no_submit_fd_matches_path 5 "$SPAWN_TEST_NO_SUBMIT_JQ_PATH" || return 1
+    /dev/fd/5 "$@"
+  }
+  readonly -f herdr jq
+}
+
+spawn_test_no_submit_bind_backend() {
+  case "$1" in
+    tmux) spawn_test_no_submit_bind_tmux_fake ;;
+    herdr) spawn_test_no_submit_bind_herdr ;;
+    orca) spawn_test_no_submit_bind_orca_fake ;;
+    *) return 1 ;;
+  esac
+}
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -456,6 +747,10 @@ else
     }
   fi
 fi
+if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] && [ "$RELAUNCH" -eq 1 ]; then
+  echo "error: test no-submit refuses relaunch before endpoint or adapter interaction" >&2
+  exit 1
+fi
 
 # omp launch pin: every omp spawn carries one explicit `--model <provider>/<model>`
 # flag of its own, or it does not happen. omp's own selection surface fuzzy-matches
@@ -484,33 +779,6 @@ require_omp_launch_model() {
 # delegation shape a firstmate primary must not stand up.
 refuse_omp_secondmate() {
   echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-}
-
-FM_OMP_REQUIRED_VERSION='omp/17.2.9'
-FM_OMP_VERSION_PROBE_SECONDS=5
-OMP_BIN=
-
-resolve_omp_binary() {
-  local candidate dir reported
-  candidate=$(command -v omp 2>/dev/null || true)
-  if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
-    echo "error: omp executable not found on PATH; install the pinned Oh My Pi release ($FM_OMP_REQUIRED_VERSION) or select a different verified harness" >&2
-    return 1
-  fi
-  case "$candidate" in
-    /*) ;;
-    *)
-      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-      [ -n "$dir" ] || { echo "error: omp executable '$candidate' could not be resolved to an absolute path" >&2; return 1; }
-      candidate="$dir/$(basename "$candidate")"
-      ;;
-  esac
-  reported=$(fm_run_timed "$FM_OMP_VERSION_PROBE_SECONDS" "$candidate" --version 2>/dev/null) || reported=
-  if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
-    echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
-    return 1
-  fi
-  printf '%s\n' "$candidate"
 }
 
 refuse_omp_unverified_gates() {
@@ -781,6 +1049,20 @@ spawn_load_harness_snapshot() {
   SPAWN_EFFECTIVE_HARNESS=$FM_HARNESS_SNAPSHOT_HARNESS
   SPAWN_CONFIG_MODEL=$FM_HARNESS_SNAPSHOT_MODEL
   SPAWN_CONFIG_EFFORT=$FM_HARNESS_SNAPSHOT_EFFORT
+  if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+    case "${FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT:-}" in
+      '') ;;
+      crew-harness-to-omp)
+        [ "$mode" = crew ] || return 1
+        printf '%s\n' omp > "$CONFIG/crew-harness" || return 1
+        ;;
+      remove-crew-dispatch)
+        [ "$mode" = crew ] || return 1
+        /bin/rm -f -- "$CONFIG/crew-dispatch.json" || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  fi
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -855,18 +1137,12 @@ if spawn_selection_is_omp; then
   fi
   require_omp_launch_model || exit 1
   require_omp_orca_backend || exit 1
-  OMP_BIN=$(resolve_omp_binary) || exit 1
   refuse_omp_unverified_gates || exit 1
 fi
 
-spawn_named_adapter_test_boundary() {
-  [ "${FM_GATE_REFUSE_BYPASS:-}" = 1 ] \
-    && [ "${FM_ADAPTER_IDENTITY_TEST_BYPASS:-}" = 1 ]
-}
-
 case "$SPAWN_EFFECTIVE_HARNESS" in
   claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
-    if ! spawn_named_adapter_test_boundary; then
+    if [ "$SPAWN_TEST_NO_SUBMIT" -ne 1 ]; then
       echo "error: named adapter '$SPAWN_EFFECTIVE_HARNESS' has no portable immutable executable-identity binding; refusing before spawn mutation" >&2
       exit 1
     fi
@@ -911,6 +1187,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
+  fi
+  if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: test no-submit refuses remote secondmate routing before readiness, inheritance, or launch" >&2
+    return 1
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
@@ -1392,6 +1674,13 @@ if [ "$SPAWN_IS_BATCH" -eq 1 ]; then
   # spanning several modes is two invocations rather than a silent mixed dispatch.
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
+  spawn_batch_child() {
+    if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+      FM_SPAWN_NO_GUARD=1 /bin/bash -p "$FM_ROOT/bin/fm-spawn.sh" "$@"
+    else
+      FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$@"
+    fi
+  }
   for pair in "${POS[@]}"; do
     case "$pair" in
       *=*) : ;;
@@ -1402,9 +1691,9 @@ if [ "$SPAWN_IS_BATCH" -eq 1 ]; then
       rc=2
       continue
     elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if spawn_batch_child "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+      if spawn_batch_child "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
     fi
   done
   exit "$rc"
@@ -1481,6 +1770,11 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] \
+     && ! spawn_test_no_submit_bind_backend "$BACKEND"; then
+    echo "error: test no-submit refuses an unbound backend '$BACKEND'" >&2
     exit 1
   fi
   if [ "$BACKEND" = orca ]; then
@@ -1732,10 +2026,14 @@ launch_template() {
 }
 
 HARNESS=$SPAWN_EFFECTIVE_HARNESS
-LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-  echo "error: no launch template for harness '$HARNESS' (from $SPAWN_HARNESS_SOURCE); select a verified named adapter with --harness" >&2
-  exit 1
-}
+if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+  LAUNCH=firstmate-test-no-submit
+else
+  LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+    echo "error: no launch template for harness '$HARNESS' (from $SPAWN_HARNESS_SOURCE); select a verified named adapter with --harness" >&2
+    exit 1
+  }
+fi
 
 # muse is verified as a CREWMATE/SCOUT adapter only. A secondmate is a firstmate
 # instance, so it needs a primary supervision protocol; muse has none, and its
@@ -1768,8 +2066,8 @@ if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
   fi
 fi
 
-case "$HARNESS" in
-  pi|pi-signed)
+case "$SPAWN_TEST_NO_SUBMIT:$HARNESS" in
+  0:pi|0:pi-signed)
     PI_BIN=$(resolve_pi_executable "$HARNESS") || {
       echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
       exit 1
@@ -1781,7 +2079,7 @@ case "$HARNESS" in
     LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
     LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
     ;;
-  cursor)
+  0:cursor)
     # `cursor` is not the CLI name, and the legacy alias `agent` is far too
     # generic to launch on its name alone, so resolution runs through the
     # verified owner rather than a bare command lookup. Refusing here keeps a
@@ -1970,8 +2268,8 @@ effort_flag_for_harness() {
   esac
 }
 
-case "$LAUNCH" in
-  *__MUSEBIN__*)
+case "$SPAWN_TEST_NO_SUBMIT:$LAUNCH" in
+  0:*__MUSEBIN__*)
     MUSE_BIN=$(resolve_muse_binary) || exit 1
     MUSE_CONFIG_HOME=$(resolve_directory_input XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-${HOME:-}/.config}") || exit 1
     MUSE_DATA_HOME=$(resolve_directory_input XDG_DATA_HOME "${XDG_DATA_HOME:-${HOME:-}/.local/share}") || exit 1
@@ -1990,15 +2288,8 @@ case "$LAUNCH" in
     ;;
 esac
 
-case "$LAUNCH" in
-  *__OMPBIN__*)
-    [ -n "$OMP_BIN" ] || OMP_BIN=$(resolve_omp_binary) || exit 1
-    LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN")}
-    ;;
-esac
-
-case "$LAUNCH" in
-  *__KIMIBIN__*)
+case "$SPAWN_TEST_NO_SUBMIT:$LAUNCH" in
+  0:*__KIMIBIN__*)
     KIMI_BIN=$(resolve_kimi_binary) || exit 1
     LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
     if [ "$KIND" != secondmate ]; then
@@ -2280,6 +2571,18 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+SPAWN_TASK_CWD=$PROJ_ABS
+if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] \
+   && [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  [ -n "$SPAWN_TEST_NO_SUBMIT_WORKTREE" ] || {
+    echo "error: test no-submit requires a preallocated isolated worktree" >&2
+    exit 1
+  }
+  WT=$(resolve_directory_input FM_SPAWN_TEST_NO_SUBMIT_WORKTREE "$SPAWN_TEST_NO_SUBMIT_WORKTREE") || exit 1
+  validate_spawn_worktree "test no-submit worktree" "$WT"
+  SPAWN_TASK_CWD=$WT
+fi
+
 freshen_spawn_worktree_base() {  # <worktree>
   local worktree=$1 default target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -2421,7 +2724,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$SPAWN_TASK_CWD") || exit 1
     WT_TARGET="$WID"
     ;;
   herdr)
@@ -2473,7 +2776,7 @@ case "$BACKEND" in
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$SPAWN_TASK_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -2527,7 +2830,7 @@ case "$BACKEND" in
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$SPAWN_TASK_CWD" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -2580,7 +2883,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$SPAWN_TASK_CWD" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2593,7 +2896,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$SPAWN_TASK_CWD") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2605,7 +2908,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$SPAWN_TASK_CWD") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2766,7 +3069,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  SPAWN_TEST_EXPECTED_WORKTREE=
+  if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+    SPAWN_TEST_EXPECTED_WORKTREE=$(real_path_or_raw "$WT")
+    WT=
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -2808,13 +3117,28 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+      echo "error: test no-submit backend did not yield an isolated worktree at its preallocated path; inspect target $T" >&2
+    else
+      echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    fi
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] \
+     && [ "$(real_path_or_raw "$WT")" != "$SPAWN_TEST_EXPECTED_WORKTREE" ]; then
+    echo "error: test no-submit backend did not yield an isolated worktree at its preallocated path; inspect target $T" >&2
+    exit 1
+  fi
+
+  if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+    validate_spawn_worktree "test no-submit backend" "$T"
+  else
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] \
+   && [ "$SPAWN_TEST_NO_SUBMIT" -eq 0 ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -2855,7 +3179,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
+if [ "$KIND" != secondmate ] && [ "$SPAWN_TEST_NO_SUBMIT" -eq 0 ]; then
   # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
   # adapter with a verified semantic source. The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
@@ -3241,6 +3565,10 @@ render_spawn_meta() {
     echo "zellij_pane_id=$ZELLIJ_PANE_ID" || return 1
   fi
   if [ "$BACKEND" = orca ]; then
+    if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ] \
+       && [ "${FM_SPAWN_TEST_NO_SUBMIT_FAIL_META_KEY:-}" = orca_worktree_id ]; then
+      return 1
+    fi
     echo "orca_worktree_id=$ORCA_WORKTREE_ID" || return 1
     echo "terminal=$ORCA_TERMINAL" || return 1
   fi
@@ -3291,6 +3619,15 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+if [ "$SPAWN_TEST_NO_SUBMIT" -eq 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  spawn_herdr_presentation_order_lock_release
+  SPAWN_DELIVERY=
+  [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+  echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT no-submit=true"
+  builtin exit 0
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

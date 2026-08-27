@@ -812,9 +812,8 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # tests/fm-tangle-guard.test.sh ("fm-spawn: appends windows by session-colon,
 # pins the name, and targets the window id"), and the real tmux create/kill path
 # by tests/fm-backend-tmux-smoke.test.sh. The send/peek/teardown conformance
-# tests below remain pure extractions and stay. (make_spawn_fakebin and
-# run_spawn_case are retained: test_spawn_default_backend_writes_no_meta_field
-# uses make_spawn_fakebin, and #294's run_spawn_symlink_case uses run_spawn_case.)
+# tests below remain pure extractions and stay. The #294 symlink case retains
+# run_spawn_case for its executable backend-path fixture.
 
 # --- symlinked project prefix must not false-refuse the isolation guard -----
 #
@@ -1007,7 +1006,7 @@ test_spawn_refuses_unknown_backend_flag() {
   # graduated to real adapters and have their own spawn tests.
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" nope-backend-z1 projects/none claude --mode no-mistakes --yolo off --backend bogus 2>&1)
+    "$ROOT/tests/fm-spawn-no-submit.sh" nope-backend-z1 projects/none claude --mode no-mistakes --yolo off --backend bogus 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn --backend bogus should refuse"
   assert_contains "$out" "unknown backend 'bogus'" "fm-spawn did not name the rejected backend"
@@ -1018,7 +1017,7 @@ test_spawn_refuses_codex_app_backend_flag() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
+    "$ROOT/tests/fm-spawn-no-submit.sh" nope-codex-app-z1 projects/none claude --mode no-mistakes --yolo off --backend codex-app 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "fm-spawn --backend codex-app should refuse"
   assert_contains "$out" "unknown backend 'codex-app'" "fm-spawn did not preserve the blocked codex-app contract"
@@ -1029,7 +1028,7 @@ test_spawn_refuses_unknown_fm_backend_env() {
   local out status
   out=$(FM_ROOT_OVERRIDE='' FM_HOME='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_SPAWN_NO_GUARD=1 FM_BACKEND=bogus \
-    "$ROOT/bin/fm-spawn.sh" nope-backend-z2 projects/none claude --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/tests/fm-spawn-no-submit.sh" nope-backend-z2 projects/none claude --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "FM_BACKEND=bogus should refuse"
   assert_contains "$out" "unknown backend 'bogus'" "fm-spawn did not name the rejected FM_BACKEND"
@@ -1041,17 +1040,15 @@ test_spawn_default_backend_writes_no_meta_field() {
   proj="$TMP_ROOT/nobackend-project"; wt="$TMP_ROOT/nobackend-wt"; data="$TMP_ROOT/nobackend-data"
   id="nobackendz3"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  local fb
-  fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
 
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
-    FM_TMUX_LOG="$TMP_ROOT/nobackend.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" \
+    "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux (the default) must not write backend= to meta (P1 compatibility contract)"
@@ -1060,22 +1057,21 @@ test_spawn_default_backend_writes_no_meta_field() {
 }
 
 test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
-  local proj wt data id state config out fb
+  local proj wt data id state config out
   proj="$TMP_ROOT/explicit-backend-project"; wt="$TMP_ROOT/explicit-backend-wt"; data="$TMP_ROOT/explicit-backend-data"
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
 
   # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
   # but an explicit --backend tmux flag must still win outright.
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
-    FM_TMUX_LOG="$TMP_ROOT/explicit-backend.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" \
+    "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend tmux 2>&1)
   expect_code 0 $? "explicit --backend tmux should spawn successfully even with HERDR_ENV=1 set"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "an explicit --backend tmux must win over an ambient HERDR_ENV=1 auto-detect marker"
@@ -1084,11 +1080,10 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
 }
 
 test_spawn_autodetect_nesting_resolves_tmux_silently() {
-  local proj wt data id state config out fb
+  local proj wt data id state config out
   proj="$TMP_ROOT/nest-project"; wt="$TMP_ROOT/nest-wt"; data="$TMP_ROOT/nest-data"
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
-  fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
   mkdir -p "$data/$id"; printf 'brief\n' > "$data/$id/brief.md"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
@@ -1098,11 +1093,11 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   # (tmux nested inside a herdr pane) - the full fm-spawn.sh pipeline, not just
   # fm_backend_name, must resolve this to tmux and stay completely silent about
   # it (today's default path, byte-identical).
-  out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+  out=$(FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" HERDR_ENV=1 \
-    FM_TMUX_LOG="$TMP_ROOT/nest.log" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$wt" FM_FAKE_PANE_PATH="$wt" \
+    "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   expect_code 0 $? "fm-spawn.sh should auto-detect tmux and spawn successfully for nested tmux-in-herdr"$'\n'"$out"
   assert_no_grep 'backend=' "$state/$id.meta" \
     "auto-detected nested tmux-in-herdr must resolve to tmux (missing backend= means tmux)"

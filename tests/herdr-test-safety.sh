@@ -4,15 +4,39 @@
 # fleet-state tripwire contract is bin/fm-herdr-lab.sh.
 set -u
 
-# Herdr backend tests drive the real fm-spawn/fm-teardown but do not source
-# tests/lib.sh, so exempt them from the gate-lifecycle refusal here too (see
-# tests/lib.sh and bin/fm-gate-refuse-lib.sh for why firstmate's own suite,
-# which the no-mistakes gate runs from a gate worktree, must be exempt).
-export FM_GATE_REFUSE_BYPASS=1
-
 HERDR_TEST_SAFETY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 . "$HERDR_TEST_SAFETY_DIR/bin/fm-herdr-lab.sh"
+
+herdr_test_resolve_file() {
+  local path=$1 directory target
+  case "$path" in /*) ;; *) path=$(pwd -P)/$path ;; esac
+  while [ -L "$path" ]; do
+    directory=$(CDPATH='' cd -- "$(dirname -- "$path")" && pwd -P) || return 1
+    target=$(/usr/bin/readlink "$path") || return 1
+    case "$target" in /*) path=$target ;; *) path=$directory/$target ;; esac
+  done
+  directory=$(CDPATH='' cd -- "$(dirname -- "$path")" && pwd -P) || return 1
+  printf '%s/%s\n' "$directory" "$(basename -- "$path")"
+}
+
+exec 6< "$HERDR_TEST_SAFETY_DIR/tests/herdr-test-safety.sh"
+export FM_SPAWN_TEST_NO_SUBMIT_HERDR_AUTH_FD=6
+
+HERDR_TEST_BINARY=$(command -v herdr 2>/dev/null || true)
+HERDR_TEST_JQ=$(command -v jq 2>/dev/null || true)
+if [ -n "$HERDR_TEST_BINARY" ] && [ -n "$HERDR_TEST_JQ" ]; then
+  HERDR_TEST_BINARY=$(herdr_test_resolve_file "$HERDR_TEST_BINARY") || HERDR_TEST_BINARY=
+  HERDR_TEST_JQ=$(herdr_test_resolve_file "$HERDR_TEST_JQ") || HERDR_TEST_JQ=
+fi
+if [ -n "$HERDR_TEST_BINARY" ] && [ -n "$HERDR_TEST_JQ" ]; then
+  exec 4< "$HERDR_TEST_BINARY"
+  exec 5< "$HERDR_TEST_JQ"
+  export FM_SPAWN_TEST_NO_SUBMIT_HERDR_FD=4
+  export FM_SPAWN_TEST_NO_SUBMIT_HERDR_PATH=$HERDR_TEST_BINARY
+  export FM_SPAWN_TEST_NO_SUBMIT_JQ_FD=5
+  export FM_SPAWN_TEST_NO_SUBMIT_JQ_PATH=$HERDR_TEST_JQ
+fi
 
 # herdr_forget_inherited_pane: drop the Herdr PANE identity this test process
 # inherited from whatever terminal it was started in.

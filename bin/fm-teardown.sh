@@ -212,11 +212,201 @@ DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
+ORCA_META_SNAPSHOT_PATHS=()
+ORCA_META_RETAINED_SNAPSHOT_PATHS=()
+ORCA_META_CAPTURED_SNAPSHOT=
+orca_meta_snapshot_retain() {
+  ORCA_META_RETAINED_SNAPSHOT_PATHS+=("$1")
+}
+orca_meta_snapshot_is_retained() {
+  local snapshot=$1 retained
+  for retained in "${ORCA_META_RETAINED_SNAPSHOT_PATHS[@]+"${ORCA_META_RETAINED_SNAPSHOT_PATHS[@]}"}"; do
+    [ "$retained" = "$snapshot" ] && return 0
+  done
+  return 1
+}
+orca_meta_snapshot_matches() {
+  local meta=$1 snapshot=$2
+  [ -f "$meta" ] && [ ! -L "$meta" ] && cmp -s "$meta" "$snapshot"
+}
+orca_meta_snapshot_capture() {
+  local meta=$1 snapshot
+  ORCA_META_CAPTURED_SNAPSHOT=
+  snapshot=$(mktemp "${meta}.validated.XXXXXX") || return 1
+  if [ -L "$meta" ] || [ ! -f "$meta" ] \
+    || ! cp "$meta" "$snapshot" \
+    || ! orca_meta_snapshot_matches "$meta" "$snapshot"; then
+    rm -f -- "$snapshot"
+    return 1
+  fi
+  ORCA_META_SNAPSHOT_PATHS+=("$snapshot")
+  ORCA_META_CAPTURED_SNAPSHOT=$snapshot
+}
+orca_meta_publish_snapshot_no_replace() {
+  local meta=$1 snapshot=$2 publish status=0
+  publish=$(mktemp "${meta}.publish.XXXXXX") || return 1
+  if ! cp "$snapshot" "$publish" \
+    || ! ln "$publish" "$meta" 2>/dev/null; then
+    status=1
+  fi
+  rm -f -- "$publish"
+  if [ "$status" -eq 0 ] \
+    && ! orca_meta_snapshot_matches "$meta" "$snapshot"; then
+    status=1
+  fi
+  return "$status"
+}
+orca_meta_compare_and_replace() {
+  local meta=$1 snapshot=$2 replacement=$3 expected next_snapshot conflict matched=1 refused=0
+  expected=$(mktemp "${snapshot}.expected.XXXXXX") || return 1
+  if ! cp "$snapshot" "$expected"; then
+    rm -f -- "$expected"
+    return 1
+  fi
+  next_snapshot=$(mktemp "${snapshot}.next.XXXXXX") || {
+    rm -f -- "$expected"
+    return 1
+  }
+  conflict=$(mktemp "${meta}.orca-conflict.XXXXXX") || {
+    rm -f -- "$expected" "$next_snapshot"
+    return 1
+  }
+  rm -f -- "$conflict"
+  if ! cp "$replacement" "$next_snapshot" \
+    || ! mv -f -- "$next_snapshot" "$snapshot"; then
+    rm -f -- "$expected" "$next_snapshot"
+    return 1
+  fi
+  if ! mv -- "$meta" "$conflict"; then
+    rm -f -- "$expected"
+    orca_meta_restore_snapshot_after_conflict "$meta" "$snapshot" || true
+    rm -f -- "$replacement"
+    return 1
+  fi
+  if [ -L "$conflict" ] || [ ! -f "$conflict" ] \
+    || ! cmp -s "$conflict" "$expected"; then
+    matched=0
+  fi
+  rm -f -- "$expected"
+  if ! orca_meta_publish_snapshot_no_replace "$meta" "$snapshot"; then
+    refused=1
+    orca_meta_restore_snapshot_after_conflict "$meta" "$snapshot" || true
+  fi
+  if ! orca_meta_snapshot_matches "$meta" "$snapshot"; then
+    refused=1
+    orca_meta_restore_snapshot_after_conflict "$meta" "$snapshot" || true
+  fi
+  rm -f -- "$replacement"
+  if ! orca_meta_snapshot_matches "$meta" "$snapshot"; then
+    orca_meta_snapshot_retain "$snapshot"
+    echo "error: preserved transitioned Orca recovery metadata at $snapshot and conflicting metadata at $conflict" >&2
+    return 1
+  fi
+  if [ "$matched" -eq 1 ] && [ "$refused" -eq 0 ]; then
+    rm -f -- "$conflict"
+    return 0
+  fi
+  if [ "$matched" -eq 1 ]; then
+    rm -f -- "$conflict"
+    echo "warning: refused Orca metadata transition after a publication collision and restored the validated surviving allocation" >&2
+    return 1
+  fi
+  echo "warning: quarantined conflicting Orca metadata at $conflict and restored the validated surviving allocation" >&2
+  return 1
+}
+orca_meta_compare_and_remove() {
+  local meta=$1 snapshot=$2 conflict
+  conflict=$(mktemp "${meta}.orca-conflict.XXXXXX") || return 1
+  rm -f -- "$conflict"
+  mv -- "$meta" "$conflict" || return 1
+  if [ -L "$conflict" ] || [ ! -f "$conflict" ] \
+    || ! cmp -s "$conflict" "$snapshot"; then
+    if orca_meta_restore_snapshot_after_conflict "$meta" "$snapshot" \
+      && orca_meta_snapshot_matches "$meta" "$snapshot"; then
+      echo "warning: preserved conflicting Orca metadata at $conflict during final retirement and restored the validated snapshot" >&2
+    else
+      orca_meta_snapshot_retain "$snapshot"
+      echo "error: preserved the validated Orca snapshot at $snapshot after final retirement restoration failed" >&2
+    fi
+    return 1
+  fi
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    if orca_meta_restore_snapshot_after_conflict "$meta" "$snapshot" \
+      && orca_meta_snapshot_matches "$meta" "$snapshot"; then
+      rm -f -- "$conflict"
+      echo "warning: refused final Orca metadata retirement after a publication collision and restored the validated snapshot" >&2
+    else
+      orca_meta_snapshot_retain "$snapshot"
+      echo "error: preserved the validated Orca snapshot at $snapshot after final retirement restoration failed" >&2
+    fi
+    return 1
+  fi
+  rm -f -- "$conflict"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    if orca_meta_restore_snapshot_after_conflict "$meta" "$snapshot" \
+      && orca_meta_snapshot_matches "$meta" "$snapshot"; then
+      echo "warning: refused final Orca metadata retirement after a publication collision and restored the validated snapshot" >&2
+    else
+      orca_meta_snapshot_retain "$snapshot"
+      echo "error: preserved the validated Orca snapshot at $snapshot after final retirement restoration failed" >&2
+    fi
+    return 1
+  fi
+  return 0
+}
+orca_meta_restore_snapshot_after_conflict() {
+  local meta=$1 snapshot=$2 conflict recovery
+  conflict=$(mktemp "${meta}.orca-conflict.XXXXXX") || {
+    orca_meta_snapshot_retain "$snapshot"
+    return 1
+  }
+  rm -f -- "$conflict"
+  if mv -- "$meta" "$conflict"; then
+    if orca_meta_publish_snapshot_no_replace "$meta" "$snapshot"; then
+      if [ -f "$conflict" ] && [ ! -L "$conflict" ] \
+        && cmp -s "$conflict" "$snapshot"; then
+        rm -f -- "$conflict"
+      else
+        echo "warning: quarantined conflicting Orca metadata at $conflict and restored the validated snapshot" >&2
+      fi
+      return 0
+    fi
+  else
+    rm -f -- "$conflict"
+    if [ ! -e "$meta" ] && [ ! -L "$meta" ] \
+      && orca_meta_publish_snapshot_no_replace "$meta" "$snapshot"; then
+      return 0
+    fi
+  fi
+  recovery=$(mktemp "${meta}.orca-recovery.XXXXXX") || {
+    orca_meta_snapshot_retain "$snapshot"
+    return 1
+  }
+  if cp "$snapshot" "$recovery"; then
+    echo "error: preserved validated Orca recovery metadata at $recovery and conflicting metadata at $conflict" >&2
+  else
+    rm -f -- "$recovery"
+    orca_meta_snapshot_retain "$snapshot"
+  fi
+  return 1
+}
+orca_meta_restore_if_changed() {
+  local meta=$1 snapshot=$2
+  orca_meta_snapshot_matches "$meta" "$snapshot" \
+    || orca_meta_restore_snapshot_after_conflict "$meta" "$snapshot" \
+    || true
+}
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
     teardown_release_herdr_locks || true
   fi
+  for ((i=${#ORCA_META_SNAPSHOT_PATHS[@]} - 1; i >= 0; i--)); do
+    orca_meta_snapshot_is_retained "${ORCA_META_SNAPSHOT_PATHS[$i]}" \
+      || rm -f -- "${ORCA_META_SNAPSHOT_PATHS[$i]}"
+  done
+  ORCA_META_SNAPSHOT_PATHS=()
+  ORCA_META_RETAINED_SNAPSHOT_PATHS=()
   for ((i=${#DESCENDANT_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
     fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
   done
@@ -675,7 +865,19 @@ fi
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
+META_ORCA_SNAPSHOT=
+META_READ=$META
 fm_backend_validate_task_endpoint "$META" "$ID" cleanup || exit 1
+if [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ]; then
+  orca_meta_snapshot_capture "$META" || {
+    echo "REFUSED: task $ID metadata changed while binding its Orca cleanup snapshot; preserving task state." >&2
+    exit 1
+  }
+  META_ORCA_SNAPSHOT=$ORCA_META_CAPTURED_SNAPSHOT
+  fm_backend_validate_task_endpoint "$META_ORCA_SNAPSHOT" "$ID" cleanup || exit 1
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ] || exit 1
+  META_READ=$META_ORCA_SNAPSHOT
+fi
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$FM_BACKEND_VALIDATED_WORKTREE
@@ -685,12 +887,18 @@ T_ORCA=
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
 fi
-HOME_PATH=$(grep '^home=' "$META" | cut -d= -f2- || true)
-PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$BACKEND" = orca ] \
+  && ! orca_meta_snapshot_matches "$META" "$META_ORCA_SNAPSHOT"; then
+  orca_meta_restore_snapshot_after_conflict "$META" "$META_ORCA_SNAPSHOT" || true
+  echo "REFUSED: task $ID metadata changed after Orca cleanup validation; preserving task state." >&2
+  exit 1
+fi
+HOME_PATH=$(grep '^home=' "$META_READ" | cut -d= -f2- || true)
+PR_URL=$(grep '^pr=' "$META_READ" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
-TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
-BUSY_GEN=$(fm_meta_get "$META" busy_gen)
+TASK_TMP=$(grep '^tasktmp=' "$META_READ" | cut -d= -f2- || true)
+BUSY_GEN=$(fm_meta_get "$META_READ" busy_gen)
 if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
 fi
@@ -698,9 +906,9 @@ ORCA_WORKTREE_ID=$FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID
 ORCA_ALLOCATION=$FM_BACKEND_VALIDATED_ORCA_ALLOCATION
 ORCA_PATH_MATCH_VERIFIED=0
 
-KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
+KIND=$(grep '^kind=' "$META_READ" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
-MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
+MODE=$(grep '^mode=' "$META_READ" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
@@ -864,7 +1072,7 @@ meta_value() {
 }
 
 retire_orca_terminal() {
-  local meta=$1 allocation=$2 temporary
+  local meta=$1 snapshot=$2 allocation=$3 temporary
   temporary=$(mktemp "${meta}.tmp.XXXXXX") || return 1
   if ! awk -F= -v allocation="$allocation" '
     $1 == "terminal" { next }
@@ -876,32 +1084,26 @@ retire_orca_terminal() {
     END {
       if (allocation == "") print "orca_allocation=worktree-only"
     }
-  ' "$meta" > "$temporary"; then
+  ' "$snapshot" > "$temporary"; then
     rm -f -- "$temporary"
     return 1
   fi
-  if ! mv -f -- "$temporary" "$meta"; then
-    rm -f -- "$temporary"
-    return 1
-  fi
+  orca_meta_compare_and_replace "$meta" "$snapshot" "$temporary"
 }
 
 retire_orca_recovery_worktree() {
-  local meta=$1 temporary
+  local meta=$1 snapshot=$2 temporary
   temporary=$(mktemp "${meta}.tmp.XXXXXX") || return 1
   if ! awk -F= '
     $1 == "terminal" || $1 == "orca_worktree_id" { next }
     $1 == "worktree" { print "worktree="; next }
     $1 == "orca_allocation" { print "orca_allocation=cleanup-complete"; next }
     { print }
-  ' "$meta" > "$temporary"; then
+  ' "$snapshot" > "$temporary"; then
     rm -f -- "$temporary"
     return 1
   fi
-  if ! mv -f -- "$temporary" "$meta"; then
-    rm -f -- "$temporary"
-    return 1
-  fi
+  orca_meta_compare_and_replace "$meta" "$snapshot" "$temporary"
 }
 
 orca_allocation_has_worktree() {
@@ -2449,20 +2651,32 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_orca_allocation child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_meta_snapshot child_meta_read child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_orca_allocation child_return_rc child_busy_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    child_meta_snapshot=
+    child_meta_read=$child_meta
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" cleanup || return 1
+    if [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ]; then
+      orca_meta_snapshot_capture "$child_meta" || {
+        echo "REFUSED: child task $child_id metadata changed while binding its Orca cleanup snapshot; preserving child task state." >&2
+        return 1
+      }
+      child_meta_snapshot=$ORCA_META_CAPTURED_SNAPSHOT
+      fm_backend_validate_task_endpoint "$child_meta_snapshot" "$child_id" cleanup || return 1
+      [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ] || return 1
+      child_meta_read=$child_meta_snapshot
+    fi
     child_backend=$FM_BACKEND_VALIDATED_BACKEND
     child_t=$FM_BACKEND_VALIDATED_TARGET
     child_wt=$FM_BACKEND_VALIDATED_WORKTREE
     child_proj=$FM_BACKEND_VALIDATED_PROJECT
     child_orca_worktree_id=$FM_BACKEND_VALIDATED_ORCA_WORKTREE_ID
     child_orca_allocation=$FM_BACKEND_VALIDATED_ORCA_ALLOCATION
-    child_kind=$(meta_value "$child_meta" kind)
+    child_kind=$(meta_value "$child_meta_read" kind)
     [ -n "$child_kind" ] || child_kind=ship
     if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
       if orca_allocation_has_worktree "$child_orca_allocation"; then
@@ -2486,14 +2700,20 @@ cleanup_firstmate_home_children() {
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta_read" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
       elif [ "$child_backend" = orca ]; then
+        orca_meta_snapshot_matches "$child_meta" "$child_meta_snapshot" || {
+          orca_meta_restore_snapshot_after_conflict "$child_meta" "$child_meta_snapshot" || true
+          echo "REFUSED: child task $child_id metadata changed before Orca terminal cleanup; preserving child task state." >&2
+          return 1
+        }
         fm_backend_source orca || return 1
         if ! fm_backend_orca_close_terminal "$child_t"; then
+          orca_meta_restore_if_changed "$child_meta" "$child_meta_snapshot"
           echo "error: could not close Orca terminal $child_t; retaining child task metadata" >&2
           return 1
         fi
-        retire_orca_terminal "$child_meta" "$child_orca_allocation" || {
+        retire_orca_terminal "$child_meta" "$child_meta_snapshot" "$child_orca_allocation" || {
           echo "error: could not retire closed Orca terminal $child_t; retaining child task metadata" >&2
           return 1
         }
@@ -2503,11 +2723,11 @@ cleanup_firstmate_home_children() {
         esac
         child_t=
       else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta_read" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
     if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
+      child_home=$(meta_value "$child_meta_read" home)
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return $?
@@ -2520,8 +2740,16 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       if orca_allocation_has_worktree "$child_orca_allocation"; then
-        fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
-        retire_orca_recovery_worktree "$child_meta" || {
+        orca_meta_snapshot_matches "$child_meta" "$child_meta_snapshot" || {
+          orca_meta_restore_snapshot_after_conflict "$child_meta" "$child_meta_snapshot" || true
+          echo "REFUSED: child task $child_id metadata changed before Orca worktree cleanup; preserving child task state." >&2
+          return 1
+        }
+        if ! fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id"; then
+          orca_meta_restore_if_changed "$child_meta" "$child_meta_snapshot"
+          return 1
+        fi
+        retire_orca_recovery_worktree "$child_meta" "$child_meta_snapshot" || {
           echo "error: could not retire removed recovery Orca worktree $child_orca_worktree_id; retaining child task metadata" >&2
           return 1
         }
@@ -2551,18 +2779,27 @@ cleanup_firstmate_home_children() {
     remove_grok_turnend_auth "$sub_state" "$child_id" || return 1
     remove_kimi_turnend_auth "$sub_state" "$child_id" || return 1
     remove_pr_poll_artifacts "$sub_state" "$child_id" || return 1
-    child_busy_gen=$(meta_value "$child_meta" busy_gen)
+    child_busy_gen=$(meta_value "$child_meta_read" busy_gen)
     if [ -z "$child_busy_gen" ]; then
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    if [ "$child_backend" = orca ]; then
+      orca_meta_compare_and_remove "$child_meta" "$child_meta_snapshot" || {
+        echo "REFUSED: child task $child_id metadata changed before final retirement; preserving child task state." >&2
+        return 1
+      }
+    fi
     rm -f "$sub_state/$child_id.turn-ended" \
-      "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged"
+  if [ "$child_backend" != orca ]; then
+    rm -f "$sub_state/$child_id.meta"
+  fi
   done
 }
 
@@ -2671,7 +2908,7 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
 fi
 
 # Non-blocking: the legacy Relay link is not guarded as a refusal.
-X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+X_REQUEST=$(grep '^x_request=' "$META_READ" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
@@ -2754,12 +2991,18 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   if [ -n "$T_ORCA" ]; then
+    orca_meta_snapshot_matches "$META" "$META_ORCA_SNAPSHOT" || {
+      orca_meta_restore_snapshot_after_conflict "$META" "$META_ORCA_SNAPSHOT" || true
+      echo "REFUSED: task $ID metadata changed before Orca terminal cleanup; preserving task state." >&2
+      exit 1
+    }
     fm_backend_source orca || exit 1
     if ! fm_backend_orca_close_terminal "$T_ORCA"; then
+      orca_meta_restore_if_changed "$META" "$META_ORCA_SNAPSHOT"
       echo "error: could not close Orca terminal $T_ORCA; retaining task metadata" >&2
       exit 1
     fi
-    retire_orca_terminal "$META" "$ORCA_ALLOCATION" || {
+    retire_orca_terminal "$META" "$META_ORCA_SNAPSHOT" "$ORCA_ALLOCATION" || {
       echo "error: could not retire closed Orca terminal $T_ORCA; retaining task metadata" >&2
       exit 1
     }
@@ -2770,8 +3013,16 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     T_ORCA=
   fi
   if orca_allocation_has_worktree "$ORCA_ALLOCATION"; then
-    fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-    retire_orca_recovery_worktree "$META" || {
+    orca_meta_snapshot_matches "$META" "$META_ORCA_SNAPSHOT" || {
+      orca_meta_restore_snapshot_after_conflict "$META" "$META_ORCA_SNAPSHOT" || true
+      echo "REFUSED: task $ID metadata changed before Orca worktree cleanup; preserving task state." >&2
+      exit 1
+    }
+    if ! fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"; then
+      orca_meta_restore_if_changed "$META" "$META_ORCA_SNAPSHOT"
+      exit 1
+    fi
+    retire_orca_recovery_worktree "$META" "$META_ORCA_SNAPSHOT" || {
       echo "error: could not retire removed recovery Orca worktree $ORCA_WORKTREE_ID; retaining task metadata" >&2
       exit 1
     }
@@ -2902,13 +3153,22 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+if [ "$BACKEND" = orca ]; then
+  orca_meta_compare_and_remove "$META" "$META_ORCA_SNAPSHOT" || {
+    echo "REFUSED: task $ID metadata changed before final retirement; preserving task state." >&2
+    exit 1
+  }
+fi
+rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged"
+if [ "$BACKEND" != orca ]; then
+  rm -f "$STATE/$ID.meta"
+fi
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

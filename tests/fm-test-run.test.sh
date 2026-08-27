@@ -112,12 +112,18 @@ init_changed_fixture_repo() {
     fm-bearings-snapshot.test.sh \
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
+    fm-adapter-identity.test.sh \
+    fm-control-relaunch.test.sh \
+    fm-spawn-dispatch-profile.test.sh \
     fm-backend-orca.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
+  : >"$repo/tests/fm-spawn-no-submit.sh"
+  : >"$repo/tests/fm-orca-fake.sh"
+  : >"$repo/bin/fm-harness-snapshot-lib.sh"
   : >"$repo/bin/fm-spawn.sh"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
@@ -168,6 +174,35 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-omp-harness.test.sh" "spawn changes select OMP policy coverage"
   git -C "$repo" add bin/fm-spawn.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm spawn-change
+
+  printf '\n' >>"$repo/bin/fm-harness-snapshot-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-spawn-dispatch-profile.test.sh" \
+    "harness snapshot helper selects spawn consumer coverage"
+  assert_contains "$listed" "tests/fm-control-relaunch.test.sh" \
+    "harness snapshot helper selects control consumer coverage"
+  git -C "$repo" add bin/fm-harness-snapshot-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm harness-snapshot-change
+
+  printf '\n' >>"$repo/tests/fm-spawn-no-submit.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-spawn-dispatch-profile.test.sh" \
+    "no-submit seam selects spawn consumer coverage"
+  assert_contains "$listed" "tests/fm-backend-herdr-smoke.test.sh" \
+    "no-submit seam selects real Herdr coverage"
+  assert_contains "$listed" "tests/fm-adapter-identity.test.sh" \
+    "no-submit seam selects adapter identity coverage"
+  assert_contains "$listed" "tests/fm-omp-harness.test.sh" \
+    "no-submit seam selects OMP dormancy coverage"
+  git -C "$repo" add tests/fm-spawn-no-submit.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm no-submit-change
+
+  printf '\n' >>"$repo/tests/fm-orca-fake.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-backend-orca.test.sh" \
+    "Orca fixture selects its executable consumer coverage"
+  git -C "$repo" add tests/fm-orca-fake.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm orca-fixture-change
 
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"

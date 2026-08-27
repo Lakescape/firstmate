@@ -41,8 +41,6 @@ command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
 
-export FM_GATE_REFUSE_BYPASS=1
-
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 # This suite asserts that HERDR_ENV=1 alone selects the backend, and it runs
@@ -109,6 +107,9 @@ git -C "$PROJ" add README.md
 git -C "$PROJ" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 git clone --quiet --bare "$PROJ" "$PROJ.origin.git"
 git -C "$PROJ" remote add origin "file://$PROJ.origin.git"
+WT=$(cd "$PROJ" && treehouse get --lease --lease-holder "fm-test-$ID-$$") \
+  || fail "could not preallocate the inert spawn worktree"
+[ -n "$WT" ] && [ -d "$WT" ] || fail "treehouse did not return an inert spawn worktree"
 
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
 
@@ -116,8 +117,8 @@ OUT_FILE="$TMP_ROOT/spawn.out"; ERR_FILE="$TMP_ROOT/spawn.err"
 env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
-  FM_SPAWN_NO_GUARD=1 \
-  "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" --harness claude --mode no-mistakes --yolo off \
+  FM_SPAWN_NO_GUARD=1 FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$WT" \
+  "$ROOT/tests/fm-spawn-no-submit.sh" "$ID" "$PROJ" --harness claude --mode no-mistakes --yolo off \
   >"$OUT_FILE" 2>"$ERR_FILE"
 status=$?
 [ "$status" -eq 0 ] || fail "fm-spawn.sh did not succeed auto-detecting herdr"$'\n'"--- stdout ---"$'\n'"$(cat "$OUT_FILE")"$'\n'"--- stderr ---"$'\n'"$(cat "$ERR_FILE")"
@@ -157,10 +158,9 @@ CAPTURED=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" --sour
   fail "capture failed on the auto-detected herdr pane"
 CAPTURED=$(printf '%s\n' "$CAPTURED" | tail -n 30)
 case "$CAPTURED" in
-  *autodetect-smoke-ok*) : ;;
-  *) fail "the named adapter stub did not run in the auto-detected herdr pane"$'\n'"$CAPTURED" ;;
+  *autodetect-smoke-ok*) fail "the no-submit seam executed the named adapter stub"$'\n'"$CAPTURED" ;;
 esac
-pass "real herdr: the auto-detected spawn's launch command actually ran in the herdr pane"
+pass "real herdr: auto-detection reaches the isolated pane without submitting an adapter"
 
 # --- teardown completes the trivial spawn/teardown cycle --------------------
 

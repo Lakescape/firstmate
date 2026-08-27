@@ -9,35 +9,32 @@
 # spawns carry no delivery posture at all. The registry keeps only the captain's
 # standing posture, for the mechanical consumers and for one advisory notice.
 #
-# Every spawn case here stops before any endpoint exists: the delivery checks run
-# ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
-# cases that are meant to get past them, so no window or worktree is ever created.
+# Every spawn case here uses an isolated fixture worktree and the inert no-submit
+# entrypoint, so delivery behavior is observable without adapter submission.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
+SPAWN="$ROOT/tests/fm-spawn-no-submit.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
-# A home with one registered project, one project directory, and a fake tmux that
-# refuses, so a spawn that clears the delivery checks still creates nothing.
-# Echoes "<home>|<project-dir>|<fakebin>".
+# A home with one registered project and an isolated fixture worktree.
+# Echoes "<home>|<project-dir>|<worktree>".
 make_home() {  # <name> [<registry-line>...]
-  local name=$1 home projects fakebin
+  local name=$1 home projects worktree
   shift
   home="$TMP_ROOT/$name/home"
   projects="$TMP_ROOT/$name/projects"
-  fakebin="$TMP_ROOT/$name/bin"
-  mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
-  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
-  chmod +x "$fakebin/tmux"
+  worktree="$TMP_ROOT/$name/worktree"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$projects"
+  fm_git_worktree "$projects/proj" "$worktree" "fm/$name"
   if [ "$#" -gt 0 ]; then
     printf '%s\n' "$@" > "$home/data/projects.md"
   fi
-  printf '%s\n' "$home|$projects/proj|$fakebin"
+  printf '%s\n' "$home|$projects/proj|$worktree"
 }
 
 write_brief() {  # <home> <id> [<recorded-mode>]
@@ -49,22 +46,23 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   } > "$home/data/$id/brief.md"
 }
 
-run_spawn() {  # <home> <fakebin> <spawn-args...>
-  local home=$1 fakebin=$2
+run_spawn() {  # <home> <worktree> <spawn-args...>
+  local home=$1 worktree=$2
   shift 2
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux \
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$worktree" FM_FAKE_PANE_PATH="$worktree" \
     "$SPAWN" "$@" 2>&1
 }
 
 # A ship spawn must stop when its delivery contract was never decided or cannot be
 # a task mode, and must leave no task metadata behind when it does.
 test_ship_spawn_requires_a_valid_delivery_contract() {
-  local rec home proj fakebin label flags expect out status n=0
+  local rec home proj worktree label flags expect out status n=0
   rec=$(make_home required)
-  IFS='|' read -r home proj fakebin <<EOF
+  IFS='|' read -r home proj worktree <<EOF
 $rec
 EOF
   while IFS='|' read -r label flags expect; do
@@ -72,7 +70,7 @@ EOF
     n=$((n + 1))
     write_brief "$home" "delivery-required-$n" no-mistakes
     # shellcheck disable=SC2086  # flags is an intentional word-split arg list
-    out=$(run_spawn "$home" "$fakebin" "delivery-required-$n" "$proj" claude $flags)
+    out=$(run_spawn "$home" "$worktree" "delivery-required-$n" "$proj" claude $flags)
     status=$?
     [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
     assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
@@ -91,24 +89,24 @@ ROWS
 # A scout has no merge to govern and a secondmate's posture is fixed, so the flags
 # are refused rather than accepted and quietly ignored.
 test_scout_and_secondmate_refuse_delivery_flags() {
-  local rec home proj fakebin out status
+  local rec home proj worktree out status
   rec=$(make_home refused)
-  IFS='|' read -r home proj fakebin <<EOF
+  IFS='|' read -r home proj worktree <<EOF
 $rec
 EOF
   write_brief "$home" delivery-scout-a1
 
-  out=$(run_spawn "$home" "$fakebin" delivery-scout-a1 "$proj" claude --scout --mode direct-PR)
+  out=$(run_spawn "$home" "$worktree" delivery-scout-a1 "$proj" claude --scout --mode direct-PR)
   status=$?
   [ "$status" -ne 0 ] || fail "a scout spawn carrying --mode should exit non-zero"
   assert_contains "$out" "--mode applies only to ship spawns" "scout spawn did not refuse --mode"
 
-  out=$(run_spawn "$home" "$fakebin" delivery-scout-a1 "$proj" claude --scout --yolo on)
+  out=$(run_spawn "$home" "$worktree" delivery-scout-a1 "$proj" claude --scout --yolo on)
   status=$?
   [ "$status" -ne 0 ] || fail "a scout spawn carrying --yolo should exit non-zero"
   assert_contains "$out" "--yolo applies only to ship spawns" "scout spawn did not refuse --yolo"
 
-  out=$(run_spawn "$home" "$fakebin" delivery-sm-a2 "$home" --secondmate --mode no-mistakes --yolo off)
+  out=$(run_spawn "$home" "$worktree" delivery-sm-a2 "$home" --secondmate --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a secondmate spawn carrying delivery flags should exit non-zero"
   assert_contains "$out" "applies only to ship spawns" "secondmate spawn did not refuse the delivery flags"
@@ -119,13 +117,13 @@ EOF
 # disagrees with the brief's recorded contract must refuse instead of launching a
 # worker whose instructions contradict the recorded task delivery.
 test_spawn_refuses_a_brief_mode_mismatch() {
-  local rec home proj fakebin out status
+  local rec home proj worktree out status
   rec=$(make_home agreement)
-  IFS='|' read -r home proj fakebin <<EOF
+  IFS='|' read -r home proj worktree <<EOF
 $rec
 EOF
   write_brief "$home" delivery-mismatch-b1 no-mistakes
-  out=$(run_spawn "$home" "$fakebin" delivery-mismatch-b1 "$proj" claude --mode direct-PR --yolo off)
+  out=$(run_spawn "$home" "$worktree" delivery-mismatch-b1 "$proj" claude --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a brief/spawn mode mismatch should exit non-zero"
   assert_contains "$out" "delivery mismatch for delivery-mismatch-b1" "mismatch refusal did not name the task"
@@ -133,14 +131,16 @@ EOF
     "mismatch refusal did not show both sides of the disagreement"
   assert_absent "$home/state/delivery-mismatch-b1.meta" "mismatched spawn wrote task metadata"
 
-  # The agreeing case clears the check and only fails later, at the refusing tmux.
+  # The agreeing case clears the check and reaches inert metadata publication.
   write_brief "$home" delivery-agree-b2 direct-PR
-  out=$(run_spawn "$home" "$fakebin" delivery-agree-b2 "$proj" claude --mode direct-PR --yolo off)
+  out=$(run_spawn "$home" "$worktree" delivery-agree-b2 "$proj" claude --mode direct-PR --yolo off)
+  assert_contains "$out" "no-submit=true" "an agreeing mode did not clear delivery validation"
   assert_not_contains "$out" "delivery mismatch" "an agreeing mode was reported as a mismatch"
 
   # A brief scaffolded before the contract line existed warns once and continues.
   write_brief "$home" delivery-legacy-b3
-  out=$(run_spawn "$home" "$fakebin" delivery-legacy-b3 "$proj" claude --mode local-only --yolo off)
+  out=$(run_spawn "$home" "$worktree" delivery-legacy-b3 "$proj" claude --mode local-only --yolo off)
+  assert_contains "$out" "no-submit=true" "a legacy brief did not clear delivery validation"
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
@@ -152,16 +152,17 @@ EOF
 # (AGENTS.md section 7), so a downgrade there is announced too. A conditional
 # policy is excluded because both of its legs are legitimate classifications.
 test_spawn_notices_a_rigor_downgrade_against_the_registry() {
-  local rec home proj fakebin out label mode registry expect registered n=0
+  local rec home proj worktree out label mode registry expect registered n=0
   while IFS='|' read -r label registry mode expect registered; do
     [ -n "$label" ] || continue
     n=$((n + 1))
     rec=$(make_home "deviation-$n" "$registry")
-    IFS='|' read -r home proj fakebin <<EOF
+    IFS='|' read -r home proj worktree <<EOF
 $rec
 EOF
     write_brief "$home" "delivery-dev-$n" "$mode"
-    out=$(run_spawn "$home" "$fakebin" "delivery-dev-$n" "$proj" claude --mode "$mode" --yolo off)
+    out=$(run_spawn "$home" "$worktree" "delivery-dev-$n" "$proj" claude --mode "$mode" --yolo off)
+    assert_contains "$out" "no-submit=true" "$label: spawn did not reach inert metadata publication"
     case "$expect" in
       notice)
         assert_contains "$out" "less rigor than the captain's standing posture" \
@@ -186,13 +187,14 @@ ROWS
 # A scout's deliverable is a report, so it records no delivery posture at all;
 # teardown already treats an absent mode as the most protective one.
 test_scout_records_no_delivery_posture() {
-  local rec home proj fakebin out
+  local rec home proj worktree out
   rec=$(make_home scout-meta "- proj [direct-PR] - fixture (added 2026-01-01)")
-  IFS='|' read -r home proj fakebin <<EOF
+  IFS='|' read -r home proj worktree <<EOF
 $rec
 EOF
   write_brief "$home" delivery-scoutmeta-c1
-  out=$(run_spawn "$home" "$fakebin" delivery-scoutmeta-c1 "$proj" claude --scout)
+  out=$(run_spawn "$home" "$worktree" delivery-scoutmeta-c1 "$proj" claude --scout)
+  assert_contains "$out" "no-submit=true" "the scout did not reach inert metadata publication"
   assert_not_contains "$out" "less rigor" "a scout spawn consulted the registered delivery posture"
   assert_not_contains "$out" "delivery mismatch" "a scout spawn checked a delivery contract it does not carry"
   pass "fm-spawn: a scout spawn resolves no delivery posture from the registry"

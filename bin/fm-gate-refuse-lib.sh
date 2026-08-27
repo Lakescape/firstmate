@@ -37,22 +37,6 @@
 # to firstmate maintainers. It layers ABOVE no-mistakes' separately-shipping
 # HEAD-continuity guard, which remains the adversarial/residual backstop.
 #
-# TEST-HARNESS ESCAPE HATCH (FM_GATE_REFUSE_BYPASS=1): firstmate's own test suite
-# must exercise the REAL fm-spawn/fm-send/fm-teardown, but the no-mistakes gate
-# runs that suite FROM a gate worktree (cwd git-common-dir under
-# .no-mistakes/repos/*.git, and possibly NO_MISTAKES_GATE set) - the exact
-# environment this guard refuses. So both signals would fire during firstmate's
-# own validation and break unrelated tests. FM_GATE_REFUSE_BYPASS=1 makes the
-# guard a no-op; firstmate's shared test helpers (tests/lib.sh and the backend
-# safety helpers) export it, so every test that drives these scripts against its
-# temp-sandbox fleet is exempt. This does NOT weaken the boundary against the
-# real hazard: the threat is a CONFUSED-not-adversarial gate agent that runs
-# bin/fm-spawn.sh directly after adopting firstmate's identity - it never sources
-# firstmate's test helpers, so it never carries the bypass; and the adversarial
-# case (an agent that would deliberately set it) is covered by no-mistakes'
-# neutral-execution-context and the HEAD-continuity guard. The dedicated
-# tests/fm-gate-refuse.test.sh strips the bypass so it still verifies real refusal.
-#
 # Sourced by bin/fm-spawn.sh, bin/fm-send.sh, bin/fm-teardown.sh,
 # bin/fm-sessionstart-nudge.sh, and the tests.
 # No side effects on source. set -u / set -e safe. The refusal is a hard exit,
@@ -68,9 +52,6 @@ FM_GATE_REFUSE_EXIT=3
 # callers that omit it retain the historical current-worktree behavior.
 fm_is_gate_agent() {
   local anchor=${1:-.} common
-  if [ "${FM_GATE_REFUSE_BYPASS:-}" = 1 ]; then
-    return 1
-  fi
   if [ "${NO_MISTAKES_GATE+x}" = x ]; then
     FM_GATE_REFUSE_REASON='env'
     return 0
@@ -89,8 +70,7 @@ fm_is_gate_agent() {
 
 # fm_refuse_if_gate_agent: exit FM_GATE_REFUSE_EXIT with a clear stderr message if
 # this process looks like a no-mistakes gate agent. Call before any fleet
-# mutation. No-ops (returns 0) for a normal firstmate session, or when firstmate's
-# own test harness sets FM_GATE_REFUSE_BYPASS=1 (see the header).
+# mutation. No-ops (returns 0) for a normal firstmate session.
 fm_refuse_if_gate_agent() {
   fm_is_gate_agent "${1:-.}" || return 0
   if [ "$FM_GATE_REFUSE_REASON" = env ]; then

@@ -908,6 +908,14 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    tests/fm-spawn-no-submit.sh)
+      printf '%s\n' backend-dispatch
+      printf '%s\n' real-herdr-gated
+      printf '%s\n' pure-contract-unit
+      ;;
+    tests/fm-orca-fake.sh)
+      printf '%s\n' orca
+      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
@@ -1006,6 +1014,9 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-harness-snapshot-lib.sh)
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)
@@ -1519,6 +1530,8 @@ if [ "$JOBS" -gt 1 ]; then
 fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
+TEST_CWD="$RUN_TMP/cwd"
+mkdir -p "$TEST_CWD"
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
@@ -1599,11 +1612,13 @@ record_script_result() {
 
 run_one_serial() {
   local script=$1
-  local base family expected out begin_iso begin_ms end_ms end_iso duration rc
+  local base family expected out begin_iso begin_ms end_ms end_iso duration rc executable test_cwd
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
   out="$RUN_TMP/out.$TOTAL"
+  test_cwd="$TEST_CWD/$base"
+  mkdir -p "$test_cwd"
   begin_iso=$(now_iso)
   begin_ms=$(now_ms)
 
@@ -1613,7 +1628,8 @@ run_one_serial() {
   set +e
   # Stream live output while retaining a copy for gate-skip detection.
   # PIPESTATUS[0] is the test script; tee's exit is ignored for aggregate.
-  bash "$script" 2>&1 | tee "$out"
+  case "$script" in /*) executable=$script ;; *) executable="$ROOT/$script" ;; esac
+  (cd "$test_cwd" && env -u NO_MISTAKES_GATE bash "$executable") 2>&1 | tee "$out"
   rc=${PIPESTATUS[0]}
   set -e
   : "${rc:=1}"
@@ -1718,9 +1734,11 @@ else
       export TMP="$work/tmp"
       unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
         FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
-      cd "$ROOT" || exit 1
+      unset NO_MISTAKES_GATE 2>/dev/null || true
+      cd "$work/tmp" || exit 1
       begin_ms=$(now_ms)
-      bash "$script" >"$work/output" 2>&1
+      case "$script" in /*) executable=$script ;; *) executable="$ROOT/$script" ;; esac
+      bash "$executable" >"$work/output" 2>&1
       rc=$?
       end_ms=$(now_ms)
       duration=$((end_ms - begin_ms))

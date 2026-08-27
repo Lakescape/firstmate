@@ -1011,17 +1011,17 @@ The OMP adapter and manifest are review-only.
 They may report requested and rendered settings for exact `omp/17.2.9`, but those records are not effective consumer proof; effective configuration, fallback isolation, and effective tool construction remain explicitly unproven.
 No supported session-free consumer pinned to that exact artifact has been established.
 
-The opt-in proof gate performs only a bounded, non-launching `omp --version` self-report check and then fails closed before any agent session or provider startup:
+The opt-in proof gate fails closed without resolving or executing any OMP candidate:
 
 ```sh
 FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 ```
 
 ```text
-not ok - exact omp/17.2.9 has no available importable session-free configuration and tool consumer; candidate remains dormant
+not ok - requested omp/17.2.9 has no supported session-free configuration and tool consumer; executable provenance, version, and effective behavior remain unproven; candidate remains dormant without resolving or executing OMP
 ```
 
-That self-report does not establish immutable executable provenance or any effective consumer behavior.
+The requested release metadata does not establish immutable executable provenance, installed version, or any effective consumer behavior.
 OMP remains hard dormant and non-runnable.
 Before dormancy can be reconsidered, all three independent mandatory prerequisites must pass:
 

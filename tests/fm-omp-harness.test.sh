@@ -3,12 +3,10 @@
 # CANDIDATE omp (Oh My Pi) crewmate/scout harness owned by bin/fm-spawn.sh, bin/fm-harness.sh,
 # bin/fm-busy-lib.sh, and bin/backends/tmux.sh.
 #
-# Spawn cases run the REAL fm-spawn against a fake tmux pane and a STUB
-# `omp` executable on PATH. The installed Oh My Pi asset is never executed, no
-# provider call, model discovery, prompt, or TUI/RPC session happens, and no
-# live omp process is ever created. The stub answers `--version` only, and the
-# runnable boundary remains closed pending independent consumer-containment and
-# ATX-2170 lifecycle proofs.
+# Spawn cases run the REAL fm-spawn against a fake backend and hostile `omp`
+# executables on PATH. Every executable stays untouched while the runnable
+# boundary remains closed pending independent consumer-containment and ATX-2170
+# lifecycle proofs.
 #
 # Two of the cases are POLICY MATRICES that report their own row counts rather
 # than a bare pass, so a silently shrinking matrix cannot read as green:
@@ -32,12 +30,12 @@ fm_backend_source tmux || { echo "unable to load the tmux backend library" >&2; 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-omp-harness)
 
-# The one release the adapter is pinned to; drift from this must refuse.
+# The requested release recorded by the candidate metadata contract.
 OMP_PINNED_VERSION="omp/17.2.9"
 
 # Every omp launch requires an explicit, fully qualified provider/model. This is
 # a STRUCTURAL fixture string only: no provider is contacted, no model catalog is
-# queried, and the stub executable still refuses to open any session.
+# queried, and no candidate executable is invoked.
 OMP_MODEL="anthropic/claude-sonnet-4-5"
 
 make_omp_fakebin() {  # <dir> [omp-version|absent] -> echoes fakebin dir
@@ -114,10 +112,8 @@ esac
 SH
   chmod +x "$fakebin/orca"
   fm_fake_exit0 "$fakebin" treehouse
-  # `absent` deliberately installs no omp at all, so PATH resolution must fail.
+  # `absent` deliberately installs no omp at all.
   if [ "$version" != absent ]; then
-    # The stub records every argv it is given, so a test can prove the adapter
-    # probes ONLY --version and never opens a session.
     cat > "$fakebin/omp" <<SH
 #!/usr/bin/env bash
 set -u
@@ -167,116 +163,70 @@ $1
 EOF
 }
 
-# The absence case must prove the adapter's own refusal, so its PATH is the
-# fakebin plus the base system directories ONLY. Inheriting the caller's PATH
-# would let a REAL installed omp resolve, and the test would then silently prove
-# nothing while also violating the stubs-only rule for deterministic
-# verification.
-OMP_ABSENT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-
 run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
-  local home=$1 wt=$2 fakebin=$3 path
+  local home=$1 wt=$2 fakebin=$3 path spawn=$SPAWN backend=${FM_TEST_BACKEND:-orca} test_worktree=
   shift 3
+  if [ "${FM_TEST_NO_SUBMIT:-0}" = 1 ]; then
+    spawn="$ROOT/tests/fm-spawn-no-submit.sh"
+    backend=${FM_TEST_BACKEND:-tmux}
+    test_worktree=$wt
+  fi
   path="$fakebin:${FM_TEST_BASE_PATH:-$PATH}"
-  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    GROK_HOME="$home/grok-home" PATH="$path" FM_BACKEND="${FM_TEST_BACKEND:-orca}" \
+    GROK_HOME="$home/grok-home" PATH="$path" FM_BACKEND="$backend" \
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$test_worktree" \
     FM_OMP_STUB_LOG="${FM_OMP_STUB_LOG:-}" FM_TMUX_LOG="${FM_TMUX_LOG:-}" \
-    FM_TEST_REAL_HARNESS="${FM_TEST_REAL_HARNESS:-}" \
-    FM_TEST_SELECTION_FILE="${FM_TEST_SELECTION_FILE:-}" \
-    FM_TEST_SELECTION_VALUE="${FM_TEST_SELECTION_VALUE:-}" \
-    FM_TEST_SELECTION_MARKER="${FM_TEST_SELECTION_MARKER:-}" \
-    FM_TEST_DISPATCH_FILE="${FM_TEST_DISPATCH_FILE:-}" \
-    FM_TEST_GUARD_MARKER="${FM_TEST_GUARD_MARKER:-}" \
-    "$SPAWN" "$@" 2>&1
+    FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT="${FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT:-}" \
+    "$spawn" "$@" 2>&1
 }
 
 # The same environment as run_spawn but WITHOUT FM_SPAWN_NO_GUARD, so
 # bin/fm-guard.sh actually runs. The guard is the earliest writer of home state
 # on the spawn path, which is what makes it usable as an ordering probe.
 run_spawn_guarded() {  # <home> <wt> <fakebin> <spawn-args...>
-  local home=$1 wt=$2 fakebin=$3 path
+  local home=$1 wt=$2 fakebin=$3 path spawn=$SPAWN backend=${FM_TEST_BACKEND:-orca} test_worktree=
   shift 3
+  if [ "${FM_TEST_NO_SUBMIT:-0}" = 1 ]; then
+    spawn="$ROOT/tests/fm-spawn-no-submit.sh"
+    backend=${FM_TEST_BACKEND:-tmux}
+    test_worktree=$wt
+  fi
   path="$fakebin:${FM_TEST_BASE_PATH:-$PATH}"
-  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-}" FM_HOME="$home" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
-    GROK_HOME="$home/grok-home" PATH="$path" FM_BACKEND="${FM_TEST_BACKEND:-orca}" \
+    GROK_HOME="$home/grok-home" PATH="$path" FM_BACKEND="$backend" \
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$test_worktree" \
     FM_OMP_STUB_LOG="${FM_OMP_STUB_LOG:-}" FM_TMUX_LOG="${FM_TMUX_LOG:-}" \
-    FM_TEST_REAL_HARNESS="${FM_TEST_REAL_HARNESS:-}" \
-    FM_TEST_SELECTION_FILE="${FM_TEST_SELECTION_FILE:-}" \
-    FM_TEST_SELECTION_VALUE="${FM_TEST_SELECTION_VALUE:-}" \
-    FM_TEST_SELECTION_MARKER="${FM_TEST_SELECTION_MARKER:-}" \
-    FM_TEST_DISPATCH_FILE="${FM_TEST_DISPATCH_FILE:-}" \
-    FM_TEST_GUARD_MARKER="${FM_TEST_GUARD_MARKER:-}" \
-    "$SPAWN" "$@" 2>&1
-}
-
-make_selection_mutating_root() {  # <dir> <harness|guard>
-  local dir=$1 mode=$2 root="$1/root" entry
-  mkdir -p "$root/bin"
-  for entry in "$ROOT/bin"/*; do
-    ln -s "$entry" "$root/bin/$(basename "$entry")"
-  done
-  case "$mode" in
-    harness)
-      rm "$root/bin/fm-harness.sh"
-      cat > "$root/bin/fm-harness.sh" <<'SH'
-#!/usr/bin/env bash
-set -u
-output=$("${FM_TEST_REAL_HARNESS:?}" "$@") || exit $?
-if [ ! -e "${FM_TEST_SELECTION_MARKER:?}" ]; then
-  temporary="${FM_TEST_SELECTION_FILE:?}.swap.$$"
-  printf '%s\n' "${FM_TEST_SELECTION_VALUE:?}" > "$temporary"
-  mv "$temporary" "$FM_TEST_SELECTION_FILE"
-  touch "$FM_TEST_SELECTION_MARKER"
-fi
-printf '%s\n' "$output"
-SH
-      chmod +x "$root/bin/fm-harness.sh"
-      ;;
-    guard)
-      rm "$root/bin/fm-guard.sh"
-      cat > "$root/bin/fm-guard.sh" <<'SH'
-#!/usr/bin/env bash
-set -u
-rm -f "${FM_TEST_DISPATCH_FILE:?}"
-touch "${FM_TEST_GUARD_MARKER:?}"
-SH
-      chmod +x "$root/bin/fm-guard.sh"
-      ;;
-  esac
-  printf '%s\n' "$root"
+    FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT="${FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT:-}" \
+    "$spawn" "$@" 2>&1
 }
 
 test_effective_crew_selection_snapshot_is_immutable() {
-  local kind rec id root marker tmux_log stub_log out status second_id
+  local kind rec id tmux_log stub_log out status second_id
   for kind in ship scout batch; do
     id="omp-snapshot-$kind"
     rec=$(make_omp_case "omp-snapshot-$kind" claude "$id")
     read_case_record "$rec"
-    root=$(make_selection_mutating_root "$CASE_DIR/mutating-root" harness)
-    marker="$CASE_DIR/selection-mutated"
     tmux_log="$CASE_DIR/tmux-sends"
     stub_log="$CASE_DIR/omp-argv"
     : > "$tmux_log"
     : > "$stub_log"
     case "$kind" in
       ship)
-        out=$(FM_TEST_ROOT_OVERRIDE="$root" FM_TEST_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
-          FM_TEST_SELECTION_FILE="$HOME_DIR/config/crew-harness" FM_TEST_SELECTION_VALUE=omp \
-          FM_TEST_SELECTION_MARKER="$marker" FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
+        out=$(FM_TEST_NO_SUBMIT=1 FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT=crew-harness-to-omp \
+          FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
           run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
           "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
         status=$?
         ;;
       scout)
-        out=$(FM_TEST_ROOT_OVERRIDE="$root" FM_TEST_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
-          FM_TEST_SELECTION_FILE="$HOME_DIR/config/crew-harness" FM_TEST_SELECTION_VALUE=omp \
-          FM_TEST_SELECTION_MARKER="$marker" FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
+        out=$(FM_TEST_NO_SUBMIT=1 FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT=crew-harness-to-omp \
+          FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
           run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
           "$id" "$PROJ_DIR" --scout)
         status=$?
@@ -285,16 +235,14 @@ test_effective_crew_selection_snapshot_is_immutable() {
         second_id="$id-b"
         mkdir -p "$HOME_DIR/data/$second_id"
         printf 'brief for %s\n' "$second_id" > "$HOME_DIR/data/$second_id/brief.md"
-        out=$(FM_TEST_ROOT_OVERRIDE="$root" FM_TEST_REAL_HARNESS="$ROOT/bin/fm-harness.sh" \
-          FM_TEST_SELECTION_FILE="$HOME_DIR/config/crew-harness" FM_TEST_SELECTION_VALUE=omp \
-          FM_TEST_SELECTION_MARKER="$marker" FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
+        out=$(FM_TEST_NO_SUBMIT=1 FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT=crew-harness-to-omp \
+          FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
           run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
           "$id=$PROJ_DIR" "$second_id=$PROJ_DIR" --mode no-mistakes --yolo off)
         status=$?
         ;;
     esac
     expect_code 0 "$status" "$kind spawn did not retain its frozen Claude selection"$'\n'"$out"
-    assert_present "$marker" "$kind selection fixture did not mutate crew-harness"
     [ "$(cat "$HOME_DIR/config/crew-harness")" = omp ] \
       || fail "$kind selection fixture did not replace crew-harness with omp"
     assert_grep 'harness=claude' "$HOME_DIR/state/$id.meta" \
@@ -303,34 +251,31 @@ test_effective_crew_selection_snapshot_is_immutable() {
       assert_grep 'harness=claude' "$HOME_DIR/state/$second_id.meta" \
         "batch child did not inherit the parent's frozen Claude harness"
     fi
-    assert_contains "$(cat "$tmux_log")" "dangerously-skip-permissions" \
-      "$kind spawn did not submit the frozen Claude template"
+    assert_contains "$out" "no-submit=true" "$kind spawn did not use the inert seam"
+    [ ! -s "$tmux_log" ] || fail "$kind inert spawn submitted to the backend"
     [ ! -s "$stub_log" ] || fail "$kind spawn invoked the OMP binary after config changed"
   done
-  pass "ship, scout, and batch submit one frozen crew harness snapshot"
+  pass "ship, scout, and batch retain one frozen crew harness without submission"
 }
 
 test_dispatch_presence_snapshot_cannot_disappear_into_omp() {
-  local rec id=omp-dispatch-snapshot root marker tmux_log stub_log out status
+  local rec id=omp-dispatch-snapshot tmux_log stub_log out status
   rec=$(make_omp_case omp-dispatch-snapshot omp "$id")
   read_case_record "$rec"
   printf '{"default":{"harness":"claude"}}\n' > "$HOME_DIR/config/crew-dispatch.json"
-  root=$(make_selection_mutating_root "$CASE_DIR/mutating-root" guard)
-  marker="$CASE_DIR/guard-ran"
   tmux_log="$CASE_DIR/tmux-sends"
   stub_log="$CASE_DIR/omp-argv"
   : > "$tmux_log"
   : > "$stub_log"
-  out=$(FM_TEST_ROOT_OVERRIDE="$root" FM_TEST_DISPATCH_FILE="$HOME_DIR/config/crew-dispatch.json" \
-    FM_TEST_GUARD_MARKER="$marker" FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
+  out=$(FM_TEST_NO_SUBMIT=1 FM_SPAWN_TEST_NO_SUBMIT_AFTER_SNAPSHOT=remove-crew-dispatch \
+    FM_TMUX_LOG="$tmux_log" FM_OMP_STUB_LOG="$stub_log" \
     run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
     "$id" "$PROJ_DIR" --model "$OMP_MODEL" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "active dispatch snapshot must refuse implicit selection: $out"
   assert_contains "$out" "config/crew-dispatch.json is active" \
     "dispatch snapshot refusal did not name the active profile"
-  assert_absent "$marker" "dispatch profile disappeared after the frozen selection point"
-  assert_present "$HOME_DIR/config/crew-dispatch.json" "dispatch profile was removed before refusal"
+  assert_absent "$HOME_DIR/config/crew-dispatch.json" "dispatch fixture did not mutate after snapshot capture"
   assert_absent "$HOME_DIR/state/$id.meta" "dispatch snapshot refusal published metadata"
   [ ! -s "$tmux_log" ] || fail "dispatch snapshot refusal submitted to the backend"
   [ ! -s "$stub_log" ] || fail "dispatch snapshot refusal invoked OMP"
@@ -378,105 +323,43 @@ test_omp_is_unreachable_without_explicit_selection() {
   # crew-harness stays claude: nothing may reach omp implicitly.
   rec=$(make_omp_case omp-default claude "$id")
   read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  out=$(FM_TEST_NO_SUBMIT=1 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
   expect_code 0 $? "default spawn should succeed: $out"
   assert_contains "$out" "spawned $id harness=claude" "an unselected omp must not be reachable"
   assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "no omp extension may be written for another harness"
   pass "omp is dormant: it is unreachable unless it is explicitly selected"
 }
 
-# --- version pin -----------------------------------------------------------
+# --- dormant executable boundary ------------------------------------------
 
-test_omp_accepts_only_the_exact_pinned_version() {
-  local rec id=omp-version out stub_log
-  rec=$(make_omp_case omp-version claude "$id")
-  read_case_record "$rec"
-  stub_log="$CASE_DIR/omp-argv"
-  : > "$stub_log"
-  if out=$(FM_OMP_STUB_LOG="$stub_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off); then
-    fail "the pinned OMP build must remain dormant: $out"
-  fi
-  assert_contains "$out" "session-free omp/17.2.9 consumer" "the pinned build did not reach both mandatory gates: $out"
-  [ "$(cat "$stub_log")" = "omp"$'\x1f'"--version" ] \
-    || fail "adapter must invoke omp exactly once, with --version only, got: $(cat "$stub_log")"
-  assert_absent "$HOME_DIR/state/$id.meta" "the dormant OMP selection published metadata"
-  assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "the dormant OMP selection rendered an extension"
-  pass "the exact pinned OMP build is identity-probed but remains dormant"
-}
-
-test_omp_refuses_a_missing_binary() {
-  local rec id=omp-absent out status
-  rec=$(make_omp_case omp-absent claude "$id" absent)
-  read_case_record "$rec"
-  # Guard the guard: if the isolated PATH could still see an omp, this case
-  # would pass for the wrong reason.
-  ! PATH="$FAKEBIN_DIR:$OMP_ABSENT_PATH" command -v omp >/dev/null 2>&1 \
-    || fail "the absence fixture must not be able to resolve any omp executable"
-  out=$(FM_TEST_BASE_PATH="$OMP_ABSENT_PATH" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "omp spawn must fail when the executable is absent: $out"
-  assert_contains "$out" "omp executable not found on PATH" "absence refusal did not name the missing executable"
-  assert_absent "$HOME_DIR/state/$id.meta" "a refused omp spawn must not publish task metadata"
-  pass "omp refuses to launch when no omp executable is on PATH"
-}
-
-test_omp_refuses_version_drift() {
-  local rec id out status reported label stub_log row=0
-  for label in different-release surrounding-whitespace extra-output; do
+test_omp_dormancy_never_resolves_or_executes_candidate() {
+  local label version rec id out status stub_log row=0
+  for label in requested drift substituted hanging absent; do
     case "$label" in
-      different-release) reported='omp/17.3.0' ;;
-      surrounding-whitespace) reported=" $OMP_PINNED_VERSION " ;;
-      extra-output) reported="$OMP_PINNED_VERSION"$'\n''extra' ;;
+      requested) version=$OMP_PINNED_VERSION ;;
+      drift) version=omp/17.3.0 ;;
+      substituted) version=pi/0.82.0 ;;
+      hanging) version=hang ;;
+      absent) version=absent ;;
     esac
     row=$((row + 1))
-    id="omp-drift-$row"
-    rec=$(make_omp_case "omp-drift-$row" claude "$id" "$reported")
+    id="omp-dormant-$row"
+    rec=$(make_omp_case "$id" claude "$id" "$version")
     read_case_record "$rec"
     stub_log="$CASE_DIR/omp-argv"
     : > "$stub_log"
     out=$(FM_OMP_STUB_LOG="$stub_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
       "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
     status=$?
-    [ "$status" -ne 0 ] || fail "omp spawn must fail on $label version drift: $out"
-    assert_contains "$out" "omp version drift" "$label refusal did not name the drift"
-    assert_contains "$out" "$OMP_PINNED_VERSION" "$label refusal did not name the pinned version"
-    [ "$(cat "$stub_log")" = "omp"$'\x1f'"--version" ] \
-      || fail "$label version probe must invoke omp exactly once with --version"
-    assert_absent "$HOME_DIR/state/$id.meta" "$label version drift published task metadata"
+    [ "$status" -ne 0 ] || fail "$label candidate escaped dormancy: $out"
+    assert_contains "$out" "session-free omp/17.2.9 consumer" \
+      "$label candidate did not stop at both mandatory gates: $out"
+    [ ! -s "$stub_log" ] || fail "$label candidate executable was invoked: $(cat "$stub_log")"
+    assert_absent "$HOME_DIR/state/$id.meta" "$label dormant selection published metadata"
+    assert_absent "$HOME_DIR/state/$id.omp-ext.ts" "$label dormant selection rendered an extension"
   done
-  [ "$row" -eq 3 ] || fail "version drift matrix lost a row"
-  pass "omp rejects release drift, surrounding whitespace, and extra version output"
-}
-
-test_omp_refuses_a_substituted_binary() {
-  local rec id=omp-substitute out status
-  # A different agent answering to the name `omp` is a substitution, not a pin.
-  rec=$(make_omp_case omp-substitute claude "$id" "pi/0.82.0")
-  read_case_record "$rec"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "omp spawn must fail on a substituted binary: $out"
-  assert_contains "$out" "omp version drift" "substitution refusal did not refuse"
-  pass "omp refuses a substituted executable that reports another agent's version"
-}
-
-test_omp_version_probe_is_hard_bounded() {
-  local rec id=omp-version-hang out status started elapsed
-  rec=$(make_omp_case omp-version-hang claude "$id" hang)
-  read_case_record "$rec"
-  started=$(date +%s)
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJ_DIR" --harness omp --model "$OMP_MODEL" --mode no-mistakes --yolo off)
-  status=$?
-  elapsed=$(($(date +%s) - started))
-  [ "$status" -ne 0 ] || fail "a hanging OMP version probe must refuse the spawn"
-  [ "$elapsed" -le 8 ] || fail "the OMP version probe exceeded its five-second bound: ${elapsed}s"
-  assert_contains "$out" "omp version drift" "a timed-out OMP probe must fail the version pin"
-  assert_absent "$HOME_DIR/state/$id.meta" "a timed-out OMP probe published task metadata"
-  pass "OMP version identity probing is hard-bounded"
+  [ "$row" -eq 5 ] || fail "dormant executable matrix lost a row"
+  pass "OMP dormancy ignores requested, drifted, substituted, hanging, and absent candidates"
 }
 
 # --- launch shape ----------------------------------------------------------
@@ -530,7 +413,7 @@ NODE
   pass "OMP candidate renderer emits its requested argv and environment contract"
 }
 
-test_omp_consumer_proof_gate_checks_version_then_fails_closed() {
+test_omp_consumer_proof_gate_never_executes_candidate() {
   local dir fakebin log out status
   dir="$TMP_ROOT/omp-consumer-proof"
   fakebin="$dir/fakebin"
@@ -551,22 +434,12 @@ SH
     "$ROOT/tests/fm-omp-tools-live-e2e.test.sh" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "the unavailable exact-version consumer proof must fail closed"
-  assert_contains "$out" "no available importable session-free configuration and tool consumer" \
+  assert_contains "$out" "no supported session-free configuration and tool consumer" \
     "the consumer proof gate did not name its unresolved prerequisite"
-  [ "$(cat "$log")" = "--version" ] \
-    || fail "the unresolved consumer proof gate must execute only omp --version: $(cat "$log")"
-
-  : > "$log"
-  out=$(PATH="$fakebin:$PATH" FM_OMP_PROOF_STUB_LOG="$log" \
-    FM_OMP_PROOF_STUB_VERSION=omp/17.3.0 FM_OMP_TOOLS_LIVE_E2E=1 \
-    "$ROOT/tests/fm-omp-tools-live-e2e.test.sh" 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "the consumer proof gate accepted OMP version drift"
-  assert_contains "$out" "expected exact omp/17.2.9" \
-    "the consumer proof gate did not reject version drift"
-  [ "$(cat "$log")" = "--version" ] \
-    || fail "the drift check must execute only omp --version: $(cat "$log")"
-  pass "OMP consumer proof gate bounds identity and fails closed before sessions"
+  assert_contains "$out" "executable provenance, version, and effective behavior remain unproven" \
+    "the consumer proof gate overstated requested metadata as effective proof"
+  [ ! -s "$log" ] || fail "the unresolved consumer proof gate executed OMP: $(cat "$log")"
+  pass "OMP consumer proof gate fails closed without candidate execution"
 }
 
 test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation() {
@@ -671,7 +544,7 @@ test_ordering_probes_are_live() {
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
   arm_ordering_probes "$id"
-  out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+  out=$(FM_TEST_NO_SUBMIT=1 run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
     "$id" "$PROJ_DIR" --harness claude --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "the held per-task spawn lock must refuse this spawn: $out"
@@ -809,7 +682,7 @@ assert_raw_launch_refused_before_mutation() {
 # --- policy matrix 2: selection shapes, 16 rows -----------------------------
 
 test_omp_selection_policy_matrix() {
-  local rec out status guard_marker sub_home launch tmux_log rows=0 enforced=0
+  local rec out status guard_marker sub_home tmux_log rows=0 enforced=0
   local want_model="omp requires an explicit --model"
   local want_second="omp is a candidate crewmate/scout adapter only"
   local want_explicit="every omp spawn and relaunch requires an explicit --harness omp selection"
@@ -924,14 +797,13 @@ test_omp_selection_policy_matrix() {
   tmux_log="$CASE_DIR/tmux-sends"
   : > "$tmux_log"
   rows=$((rows + 1))
-  out=$(FM_TMUX_LOG="$tmux_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
+  out=$(FM_TEST_NO_SUBMIT=1 FM_TMUX_LOG="$tmux_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
     omp-s8 "$PROJ_DIR" --mode no-mistakes --yolo off)
   expect_code 0 $? "default claude spawn should succeed: $out"
-  launch=$(grep -F -- 'dangerously-skip-permissions' "$tmux_log" | tail -1)
-  [ -n "$launch" ] || fail "no claude launch command was delivered to the pane"
-  assert_not_contains "$launch" "--model" \
-    "a non-omp launch that requested no model must carry no model flag"
-  assert_not_contains "$launch" "--provider" "a non-omp launch must never carry a provider flag"
+  assert_contains "$out" "no-submit=true" "the non-OMP control did not use the inert seam"
+  assert_grep 'model=default' "$HOME_DIR/state/omp-s8.meta" \
+    "a non-OMP launch that requested no model did not preserve the default model request"
+  [ ! -s "$tmux_log" ] || fail "the non-OMP inert control submitted to the backend"
   enforced=$((enforced + 1))
 
   # Row 9: an opaque raw launch command must not bypass the named adapter boundary.
@@ -1308,7 +1180,7 @@ test_relaunch_lifecycle_lock_precedes_watcher_guard() {
   pass "fm-spawn relaunch: lifecycle serialization precedes watcher-state mutation"
 }
 
-test_valid_nonomp_relaunch_passes_the_preflight() {
+test_no_submit_refuses_nonomp_relaunch_before_endpoint_interaction() {
   local rec id=claude-relaunch-valid out meta tmux_log
   rec=$(make_omp_case "$id" claude "$id")
   read_case_record "$rec"
@@ -1318,12 +1190,14 @@ test_valid_nonomp_relaunch_passes_the_preflight() {
   fm_write_meta "$meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$WT_DIR" "project=$PROJ_DIR" \
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
-  out=$(FM_TEST_BACKEND=tmux FM_FAKE_WINDOW="fm-$id" FM_FAKE_COMMAND=zsh FM_TMUX_LOG="$tmux_log" \
+  out=$(FM_TEST_NO_SUBMIT=1 FM_TEST_BACKEND=tmux FM_FAKE_WINDOW="fm-$id" FM_FAKE_COMMAND=zsh FM_TMUX_LOG="$tmux_log" \
     run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch)
-  expect_code 0 $? "a valid non-OMP relaunch should pass the preflight and launch: $out"
-  assert_contains "$out" "spawned $id harness=claude" "valid non-OMP relaunch did not launch: $out"
-  assert_grep 'harness=claude' "$meta" "valid non-OMP relaunch did not preserve its harness"
-  pass "a valid non-OMP regular task record passes the relaunch preflight"
+  [ "$?" -ne 0 ] || fail "the no-submit seam accepted a relaunch: $out"
+  assert_contains "$out" "refuses relaunch before endpoint or adapter interaction" \
+    "the inert relaunch refusal was not explicit: $out"
+  assert_grep 'harness=claude' "$meta" "the inert relaunch refusal changed task metadata"
+  [ ! -s "$tmux_log" ] || fail "the inert relaunch refusal contacted an endpoint"
+  pass "no-submit refuses relaunch before endpoint or adapter interaction"
 }
 
 test_omp_relaunch_still_requires_the_model() {
@@ -1413,13 +1287,9 @@ test_omp_token_is_not_normalized_to_pi
 test_omp_is_unreachable_without_explicit_selection
 test_effective_crew_selection_snapshot_is_immutable
 test_dispatch_presence_snapshot_cannot_disappear_into_omp
-test_omp_accepts_only_the_exact_pinned_version
-test_omp_refuses_a_missing_binary
-test_omp_refuses_version_drift
-test_omp_refuses_a_substituted_binary
-test_omp_version_probe_is_hard_bounded
+test_omp_dormancy_never_resolves_or_executes_candidate
 test_omp_launch_request_is_rendered
-test_omp_consumer_proof_gate_checks_version_then_fails_closed
+test_omp_consumer_proof_gate_never_executes_candidate
 test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation
 test_ordering_probes_are_live
 test_omp_model_policy_matrix
@@ -1428,7 +1298,7 @@ test_opaque_raw_indirection_is_refused
 test_relaunch_rejects_unsafe_metadata_before_every_mutation
 test_relaunch_detects_a_path_swap_while_binding_the_snapshot
 test_relaunch_lifecycle_lock_precedes_watcher_guard
-test_valid_nonomp_relaunch_passes_the_preflight
+test_no_submit_refuses_nonomp_relaunch_before_endpoint_interaction
 test_omp_relaunch_still_requires_the_model
 test_omp_semantic_source_remains_untrusted
 

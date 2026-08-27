@@ -182,8 +182,9 @@ run_spawn() {
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
+    FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$pane" \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
+    "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
 
 test_spawn_isolation_abort() {

@@ -121,12 +121,16 @@ make_scratch_project() {  # <dir>
 
 PROJ1="$TMP_ROOT/scratch-project-1"; make_scratch_project "$PROJ1"
 PROJ2="$TMP_ROOT/scratch-project-2"; make_scratch_project "$PROJ2"
+WT1=$(cd "$PROJ1" && treehouse get --lease --lease-holder "fm-test-cm1-$$") \
+  || fail "could not preallocate cm1's inert worktree"
+[ -n "$WT1" ] && [ -d "$WT1" ] || fail "treehouse did not return cm1's inert worktree"
 
 # --- 1. primary-shaped home: a crewmate spawns into the "firstmate" space ---
 
 CM1_OUT="$TMP_ROOT/cm1.out"; CM1_ERR="$TMP_ROOT/cm1.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-  "$ROOT/bin/fm-spawn.sh" cm1 "$PROJ1" --harness claude --mode no-mistakes --yolo off --backend herdr \
+  FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$WT1" \
+  "$ROOT/tests/fm-spawn-no-submit.sh" cm1 "$PROJ1" --harness claude --mode no-mistakes --yolo off --backend herdr \
   >"$CM1_OUT" 2>"$CM1_ERR"
 rc=$?
 [ "$rc" -eq 0 ] || fail "primary-shaped crewmate spawn failed"$'\n'"--- stdout ---"$'\n'"$(cat "$CM1_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM1_ERR")"
@@ -141,7 +145,7 @@ pass "real herdr E2E: a primary-shaped home spawns a crewmate on the herdr backe
 
 sleep 1
 CM1_CAPTURE=$(fm_backend_herdr_capture "$SESSION:$CM1_PANE" 30) || fail "capture failed on cm1's pane"
-assert_contains_local "$CM1_CAPTURE" "named-adapter-ok" "cm1's named adapter stub did not run in its herdr pane"
+assert_not_contains_local "$CM1_CAPTURE" "named-adapter-ok" "cm1's no-submit seam executed the named adapter stub"
 
 CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
@@ -155,7 +159,7 @@ pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmat
 
 SM_OUT="$TMP_ROOT/sm.out"; SM_ERR="$TMP_ROOT/sm.err"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-  "$ROOT/bin/fm-spawn.sh" e2esm1 "$SM_HOME" --harness claude --secondmate --backend herdr \
+  "$ROOT/tests/fm-spawn-no-submit.sh" e2esm1 "$SM_HOME" --harness claude --secondmate --backend herdr \
   >"$SM_OUT" 2>"$SM_ERR"
 rc=$?
 [ "$rc" -eq 0 ] || fail "the primary's --secondmate spawn of e2esm1 failed"$'\n'"--- stdout ---"$'\n'"$(cat "$SM_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$SM_ERR")"
@@ -180,8 +184,12 @@ pass "real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMAT
 # secondmate workspace (this exact path has never run before this test) -----
 
 CM2_OUT="$TMP_ROOT/cm2.out"; CM2_ERR="$TMP_ROOT/cm2.err"
+WT2=$(cd "$PROJ2" && treehouse get --lease --lease-holder "fm-test-cm2-$$") \
+  || fail "could not preallocate cm2's inert worktree"
+[ -n "$WT2" ] && [ -d "$WT2" ] || fail "treehouse did not return cm2's inert worktree"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$ROOT" \
-  "$ROOT/bin/fm-spawn.sh" cm2 "$PROJ2" --harness claude --mode no-mistakes --yolo off --backend herdr \
+  FM_SPAWN_TEST_NO_SUBMIT_WORKTREE="$WT2" \
+  "$ROOT/tests/fm-spawn-no-submit.sh" cm2 "$PROJ2" --harness claude --mode no-mistakes --yolo off --backend herdr \
   >"$CM2_OUT" 2>"$CM2_ERR"
 rc=$?
 [ "$rc" -eq 0 ] || fail "a crewmate spawned FROM the secondmate-shaped home failed"$'\n'"--- stdout ---"$'\n'"$(cat "$CM2_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM2_ERR")"
@@ -196,7 +204,7 @@ pass "real herdr E2E: a crewmate spawns successfully FROM a secondmate-shaped ho
 
 sleep 1
 CM2_CAPTURE=$(fm_backend_herdr_capture "$SESSION:$CM2_PANE" 30) || fail "capture failed on cm2's pane"
-assert_contains_local "$CM2_CAPTURE" "named-adapter-ok" "cm2's named adapter stub did not run in its herdr pane"
+assert_not_contains_local "$CM2_CAPTURE" "named-adapter-ok" "cm2's no-submit seam executed the named adapter stub"
 
 CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ "$CM2_WSID" = "$SM_WSID" ] || fail "a crewmate spawned FROM the secondmate home should land in the SAME workspace as the secondmate's own task ($SM_WSID), got '$CM2_WSID'"

@@ -12,7 +12,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
+SPAWN="$ROOT/tests/fm-spawn-no-submit.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
 export FM_BACKEND=tmux
 

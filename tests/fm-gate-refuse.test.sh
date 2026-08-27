@@ -31,7 +31,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 GATE_LIB="$ROOT/bin/fm-gate-refuse-lib.sh"
-SPAWN="$ROOT/bin/fm-spawn.sh"
 SEND="$ROOT/bin/fm-send.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
@@ -85,7 +84,7 @@ run_guard_lib() {
   local cwd=$1 marker=${2:-unset}
   (
     cd "$cwd" || exit 111
-    unset NO_MISTAKES_GATE FM_GATE_REFUSE_BYPASS
+    unset NO_MISTAKES_GATE
     case "$marker" in
       set) export NO_MISTAKES_GATE=1 ;;
       empty) export NO_MISTAKES_GATE= ;;
@@ -161,13 +160,14 @@ run_spawn() {
   local cwd=$1 home=$2 id=$3 proj=$4 pane=$5 fakebin=$6; shift 6
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
-  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE \
       "FM_ROOT_OVERRIDE=" "FM_HOME=$home" \
       "FM_STATE_OVERRIDE=$home/state" "FM_DATA_OVERRIDE=$home/data" \
       "FM_PROJECTS_OVERRIDE=$home/projects" "FM_CONFIG_OVERRIDE=$home/config" \
       "FM_SPAWN_NO_GUARD=1" "FM_FAKE_PANE_PATH=$pane" "TMUX=fake,1,0" \
+      "FM_SPAWN_TEST_NO_SUBMIT_WORKTREE=$pane" \
       "PATH=$fakebin:$PATH" "$@" \
-      "$SPAWN" "$id" "$proj" codex --mode no-mistakes --yolo off ) 2>&1
+      "$ROOT/tests/fm-spawn-no-submit.sh" "$id" "$proj" codex --mode no-mistakes --yolo off ) 2>&1
 }
 
 test_spawn_refuses_and_admits() {
@@ -240,7 +240,7 @@ SH
 # run_send <cwd> <home> <fakebin> <log> <target> <text> [ASSIGN...] -> combined output
 run_send() {
   local cwd=$1 home=$2 fakebin=$3 log=$4 target=$5 text=$6; shift 6
-  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE \
       "PATH=$fakebin:$PATH" "FM_HOME=$home" "FM_ROOT_OVERRIDE=$home" \
       "FM_TMUX_LOG=$log" "FM_SEND_SETTLE=0" "$@" \
       "$SEND" "$target" "$text" ) 2>&1
@@ -335,7 +335,7 @@ SH
 # run_teardown <cwd> <case_dir> [ASSIGN...] -> combined output
 run_teardown() {
   local cwd=$1 case_dir=$2; shift 2
-  ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+  ( cd "$cwd" && env -u NO_MISTAKES_GATE \
       "FM_ROOT_OVERRIDE=$ROOT" "FM_STATE_OVERRIDE=$case_dir/state" \
       "FM_CONFIG_OVERRIDE=$case_dir/config" "PATH=$case_dir/fakebin:$PATH" "$@" \
       "$TEARDOWN" task-x1 ) 2>&1
