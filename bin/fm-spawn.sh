@@ -110,8 +110,8 @@
 #   new adapters. A raw launch must be one literal, space-delimited command whose
 #   words contain no shell quoting, expansion, redirection, globbing, or compound
 #   operators. Any word that names omp, including one behind ordinary assignment,
-#   env, or command prefixes, is refused before mutation; OMP is candidate-only
-#   and requires the canonical --harness omp template. env split-string modes are
+#   env, or command prefixes, is refused before mutation; OMP is an inert review
+#   artifact and has no production launch template. env split-string modes are
 #   also refused because they introduce a second command parser.
 #   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
@@ -164,11 +164,6 @@
 #                  written by this script; outside the worktree to avoid pi's trust gate)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
-#     __OMPBIN__   absolute path to the pinned omp executable resolved from PATH
-#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts
-#     __OMPAGENTDIR__ isolated OMP agent directory under the task temp root
-#     __OMPCWD__   isolated OMP project-settings directory under the task temp root
-#     __OMPMODEL__ quoted explicit provider/model selected for the OMP candidate
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -187,39 +182,15 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# omp (Oh My Pi) is dormant. Every runnable selection is refused until a
-# supported session-free omp/17.2.9 consumer proves effective configuration and
-# tool containment, and ATX-2170 independently proves firstmate interrupt,
-# exit, and relaunch control. Neither mandatory gate substitutes for the other.
-# bin/fm-omp-candidate-artifacts.sh owns the candidate-only launch manifest,
-# isolated config, and extension.
-# Its executable must report exactly omp/17.2.9 through one portable,
-# hard-bounded five-second --version probe before launch preparation continues.
-# omp also REQUIRES an explicit --model <provider>/<model> flag on every spawn.
-# The value is validated structurally (exactly one slash between two identifier
-# segments of letters, digits, dot, underscore, or dash), passed through
-# byte-for-byte on omp's --model flag, and never accompanied by omp's legacy
-# --provider flag. This script does not inspect where a caller obtained that
-# value and claims nothing about it; it reads no ambient omp default. Its
-# isolated per-launch agent directory and clean settings cwd request exclusion
-# of lower-priority settings layers; their rendered config requests disabled
-# model fallback, usage-aware fallback, and fallback chains. Effective consumer
-# behavior remains unproven until the independent consumer gate passes. On a fresh spawn, an absent,
-# unqualified, or malformed value
-# refuses before the watcher guard and before any lock, endpoint, worktree,
-# state, config, registry, metadata, or extension mutation. On a relaunch, the
-# task lifecycle and metadata locks first bind one stable record; the same gate
-# refuses before watcher, endpoint, worktree, task-state, config, registry,
-# metadata, or extension mutation.
-# omp is Orca-only: the backend is resolved read-only before any mutation and
-# retained so the refusal and endpoint creation cannot drift. Any other backend
-# refuses at that same early gate.
-# omp forces effective trace propagation off and strips TRACEPARENT from the
-# child; it does not inherit the home's frozen trace-context decision.
-# A --relaunch acquires the task lifecycle and metadata locks, binds one stable
-# regular-file metadata snapshot, and applies omp's model and backend gates plus
-# final endpoint validation before watcher, endpoint, worktree, task-state, or
-# config mutation.
+# omp (Oh My Pi) is an inert, non-dispatchable review artifact.
+# Every explicit, positional, configured, relaunch, batch, or raw selection is
+# refused before any OMP executable, provider, endpoint, worktree, task state,
+# configuration, registry, metadata, extension, or submission can be reached.
+# bin/fm-omp-candidate-artifacts.sh owns only a static requested manifest.
+# It accepts no caller executable, file descriptor, path, model, extension,
+# provider, or command and creates no runtime artifact.
+# Runnable adapter provenance, activation, containment, and lifecycle control
+# belong to separately scoped follow-up work and are absent from this script.
 # If an Orca allocation cannot be released during aborted spawn cleanup, this
 # script atomically publishes a cleanup-only recovery record without replacing
 # an existing task record. A failed terminal close after successful worktree
@@ -452,89 +423,12 @@ else
   fi
 fi
 
-# omp launch pin: every omp spawn carries one explicit `--model <provider>/<model>`
-# flag of its own, or it does not happen. omp's own selection surface fuzzy-matches
-# a bare model name, cycles providers, and falls back to whatever default its
-# configuration names, so an absent or unqualified value would launch a candidate
-# adapter on a provider nobody chose. This script cannot see where a caller got the
-# flag's value, and it makes no claim about that; what it requires is that the
-# value arrive on this spawn's own flag, and it neither reads nor writes an omp
-# default of its own. Validation is structural only - no model catalog is queried
-# and an accepted value is passed through byte-for-byte.
-require_omp_launch_model() {
-  if [ "$MODEL_SET" -ne 1 ] || [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
-    echo "error: omp requires an explicit --model <provider>/<model> flag on every spawn; without one omp would resolve the provider itself" >&2
-    return 1
-  fi
-  if [[ ! $MODEL =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-    echo "error: omp --model must be exactly '<provider>/<model>' - one slash between two identifier segments of letters, digits, dot, underscore, or dash (got '$MODEL')" >&2
-    return 1
-  fi
-  return 0
-}
-
-# omp is a CANDIDATE crewmate/scout adapter only. A secondmate is a firstmate
-# instance, so it needs a primary supervision protocol; omp has none under
-# docs/supervision-protocols/, and its own `task` subagent surface is exactly the
-# delegation shape a firstmate primary must not stand up.
-refuse_omp_secondmate() {
-  echo "error: omp is a candidate crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-}
-
-FM_OMP_REQUIRED_VERSION='omp/17.2.9'
-FM_OMP_VERSION_PROBE_SECONDS=5
-OMP_BIN=
-
-resolve_omp_binary() {
-  local candidate dir reported
-  candidate=$(command -v omp 2>/dev/null || true)
-  if [ -z "$candidate" ] || [ ! -x "$candidate" ]; then
-    echo "error: omp executable not found on PATH; install the pinned Oh My Pi release ($FM_OMP_REQUIRED_VERSION) or select a different verified harness" >&2
-    return 1
-  fi
-  case "$candidate" in
-    /*) ;;
-    *)
-      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || dir=
-      [ -n "$dir" ] || { echo "error: omp executable '$candidate' could not be resolved to an absolute path" >&2; return 1; }
-      candidate="$dir/$(basename "$candidate")"
-      ;;
-  esac
-  reported=$(fm_run_timed "$FM_OMP_VERSION_PROBE_SECONDS" "$candidate" --version 2>/dev/null) || reported=
-  reported=$(printf '%s\n' "$reported" | head -n 1 | tr -d '[:space:]')
-  if [ "$reported" != "$FM_OMP_REQUIRED_VERSION" ]; then
-    echo "error: omp version drift: expected '$FM_OMP_REQUIRED_VERSION', got '${reported:-<none>}'; refusing to launch an unpinned Oh My Pi build" >&2
-    return 1
-  fi
-  printf '%s\n' "$candidate"
-}
-
-refuse_omp_unverified_gates() {
-  echo "error: omp is dormant until both a supported session-free omp/17.2.9 consumer proves effective configuration and tool containment and ATX-2170 independently verifies First Mate interrupt, exit, and relaunch control; neither mandatory gate substitutes for the other; refusing every runnable OMP launch" >&2
+# OMP has no production adapter boundary.
+# This refusal is deliberately independent of executable, version, model,
+# provider, backend, and lifecycle state so no probe can precede it.
+refuse_omp_inert_artifact() {
+  echo "error: omp is an inert, non-dispatchable review artifact; First Mate has no OMP launch template and will not resolve or execute an OMP command" >&2
   return 1
-}
-
-# omp is an Orca-only worker adapter. Resolve the same backend precedence used
-# by the launch path while the invocation is still read-only, then retain that
-# result so it cannot drift between this refusal and endpoint creation.
-OMP_RESOLVED_BACKEND=
-require_omp_orca_backend() {
-  local recorded_backend
-  if [ "$#" -gt 0 ]; then
-    OMP_RESOLVED_BACKEND=$1
-  elif [ "$RELAUNCH" -eq 1 ]; then
-    recorded_backend=$(relaunch_preflight_meta_get backend)
-    OMP_RESOLVED_BACKEND=${recorded_backend:-tmux}
-  elif [ "$BACKEND_SET" -eq 1 ]; then
-    OMP_RESOLVED_BACKEND=$BACKEND_ARG
-  else
-    OMP_RESOLVED_BACKEND=$(fm_backend_name)
-  fi
-  if [ "$OMP_RESOLVED_BACKEND" != orca ]; then
-    echo "error: omp requires backend=orca; resolved backend '$OMP_RESOLVED_BACKEND' is not authorized for this adapter" >&2
-    return 1
-  fi
-  return 0
 }
 
 # --- effective selection, resolved once and before anything mutates ----------
@@ -710,7 +604,7 @@ fi
 # would actually launch has to be known before the watcher guard runs and before
 # anything is created. A --relaunch still adopts every identity axis from the
 # task's own durable record under the task's locks; those locks bind the
-# preflight snapshot before omp's model and backend gates run.
+# preflight snapshot before the inert OMP refusal runs.
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -829,8 +723,8 @@ spawn_selection_is_omp() {
     *) return 1 ;;
   esac
   # A relaunch with no explicit harness adopts the recorded harness. The task's
-  # lifecycle and metadata locks bind this preflight snapshot before omp's
-  # model/backend gates; normal locked endpoint validation remains authoritative.
+  # lifecycle and metadata locks bind this preflight snapshot before the inert
+  # refusal; normal locked endpoint validation remains authoritative.
   if [ "$RELAUNCH" -eq 1 ]; then
     configured=$(relaunch_preflight_meta_get harness)
     [ "$configured" = omp ]
@@ -846,27 +740,14 @@ spawn_selection_is_omp() {
   [ "$configured" = omp ]
 }
 
-# Every omp refusal for a fresh spawn lands here before the watcher guard, batch
+# Every OMP refusal for a fresh spawn lands here before the watcher guard, batch
 # re-exec, per-task spawn lock, or mutation. A relaunch reaches the same gate only
 # after its lifecycle and metadata locks bind the stable snapshot, and still
 # before watcher, endpoint, worktree, task-state, configuration, registry,
-# metadata, or extension mutation. The gate recognizes explicit, positional,
-# configured, batch, and raw selections.
+# metadata, or submission mutation. The gate recognizes explicit, positional,
+# configured, batch, and raw selections and performs no executable probe.
 if spawn_selection_is_omp; then
-  # A secondmate selection is refused first and unconditionally - its model is
-  # never even consulted, because the refusal is on adapter identity alone.
-  if [ "$KIND" = secondmate ]; then
-    refuse_omp_secondmate
-    exit 1
-  fi
-  if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS_ARG" != omp ]; then
-    echo "error: omp is reachable only through an explicit --harness omp selection; positional, configured, and raw omp launches are not allowed" >&2
-    exit 1
-  fi
-  require_omp_launch_model || exit 1
-  require_omp_orca_backend || exit 1
-  OMP_BIN=$(resolve_omp_binary) || exit 1
-  refuse_omp_unverified_gates || exit 1
+  refuse_omp_inert_artifact || exit 1
 fi
 
 # Now the fresh-spawn watcher guard, which writes home state. Relaunch runs it
@@ -1462,9 +1343,7 @@ fi
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
 if [ "$RELAUNCH" -eq 0 ]; then
-  if [ -n "$OMP_RESOLVED_BACKEND" ]; then
-    BACKEND=$OMP_RESOLVED_BACKEND
-  elif [ "$BACKEND_SET" -eq 1 ]; then
+  if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
     BACKEND=$(fm_backend_name)
@@ -1689,36 +1568,6 @@ launch_template() {
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
     muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-    # omp (Oh My Pi): this dormant candidate template cannot reach an endpoint
-    # until its independent consumer-containment and ATX-2170 control gates pass.
-    # --approval-mode yolo is the autonomy flag an unattended crewmate needs, the
-    # targeted equivalent of claude's --dangerously-skip-permissions.
-    # --no-title leaves the pane title firstmate's to own, --no-extensions drops
-    # every auto-discovered user/project extension, and --no-skills drops the
-    # ambient skill surface, so the only loaded extension is the firstmate-owned
-    # -e __OMPEXT__ busy-state file written below.
-    # --no-tools requests an empty built-in tool registry, the isolated settings
-    # request disabled AST edit, and --no-lsp requests disabled LSP. The portable
-    # suite pins only this emitted request; tests/fm-omp-tools-live-e2e.test.sh
-    # fails closed until an exact importable session-free consumer proves the
-    # effective configuration and constructed tool registry.
-    # __OMPAGENTDIR__ and __OMPCWD__ select empty per-launch settings roots;
-    # PI_CONFIG_FILES is cleared and the actual worktree is admitted only by
-    # --add-dir. __OMPMODEL__ appears exactly once and always renders because
-    # require_omp_launch_model above refuses unless this exact launch was given
-    # a fully qualified provider/model, so omp never selects a provider for itself. No
-    # __EFFORTFLAG__: the effort axis stays outside this adapter until the live
-    # pilot pins it under its own approval.
-    # The env -u prefix clears the foreign primary markers whose detection
-    # precedence would otherwise outrank omp's own, plus TRACEPARENT so an
-    # ambient carrier cannot reach the child after spawn forces effective
-    # trace off. FM_OMP_HARNESS=1 is the firstmate-owned launch marker that
-    # replaces the foreign markers. The list must cover EVERY marker
-    # bin/fm-harness.sh tests before FM_OMP_HARNESS, which is why the cursor
-    # pair is here: cursor-agent does not clear its own markers, so an omp
-    # worker launched from a cursor primary would otherwise inherit them and
-    # self-report cursor.
-    omp) "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" launch-template ;;
     *) return 1 ;;
   esac
 }
@@ -1767,24 +1616,11 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   exit 1
 fi
 
-# Both omp refusals already ran for every fresh-spawn selection shape -
-# including a raw launch that claims omp - and for every relaunch the
-# read-only preflight could classify from the task's own record, before the
-# watcher guard and every lock. A relaunch creates nothing of its own - it
-# adopts the endpoint, worktree, and state the task already owns - and this
-# is defense in depth for a --relaunch that named --harness omp explicitly
-# after that preflight. The refusal still lands before any launch command is
-# built or delivered.
+# The early refusal covers every fresh-spawn selection shape, including a raw
+# launch that claims OMP, and every relaunch the read-only preflight can classify.
+# This is defense in depth for an unexpected OMP identity after resolution.
 if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
-  if [ "$KIND" = secondmate ]; then
-    refuse_omp_secondmate
-    exit 1
-  fi
-  require_omp_launch_model || exit 1
-  if [ "$BACKEND" != orca ]; then
-    echo "error: omp requires backend=orca; resolved backend '$BACKEND' is not authorized for this adapter" >&2
-    exit 1
-  fi
+  refuse_omp_inert_artifact || exit 1
 fi
 
 case "$HARNESS" in
@@ -1921,12 +1757,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
-      # omp reaches here only after require_omp_launch_model accepted a fully
-      # qualified provider/model, so the exact supplied identifier is quoted
-      # through omp's own --model flag. Its legacy --provider flag is never
-      # passed: a provider argument alongside a qualified model is the ambiguity
-      # this pin exists to remove.
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
       printf -- '--model %s ' "$(shell_quote "$model")"
       ;;
   esac
@@ -2006,13 +1837,6 @@ case "$LAUNCH" in
     LAUNCH=${LAUNCH//__MUSEBIN__/$(shell_quote "$MUSE_BIN")}
     LAUNCH=${LAUNCH//__MUSECONFIG__/$(shell_quote "$MUSE_CONFIG_HOME")}
     LAUNCH=${LAUNCH//__MUSEDATA__/$(shell_quote "$MUSE_DATA_HOME")}
-    ;;
-esac
-
-case "$LAUNCH" in
-  *__OMPBIN__*)
-    [ -n "$OMP_BIN" ] || OMP_BIN=$(resolve_omp_binary) || exit 1
-    LAUNCH=${LAUNCH//__OMPBIN__/$(shell_quote "$OMP_BIN")}
     ;;
 esac
 
@@ -3018,14 +2842,6 @@ export default function (pi: any) {
 }
 EOF
       ;;
-    omp)
-      OMP_AGENT_DIR="$TASK_TMP/omp-agent"
-      OMP_CWD="$TASK_TMP/omp-cwd"
-      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" prepare "$OMP_AGENT_DIR" "$OMP_CWD" || exit 1
-      "$FM_ROOT/bin/fm-omp-candidate-artifacts.sh" extension \
-        "$STATE/$ID.omp-ext.ts" "$FM_ROOT/bin/fm-busy-event.sh" \
-        "$STATE_REAL" "$ID" "$BUSY_GEN" "$TURNEND" || exit 1
-      ;;
     codex*)
       # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
       # probes and the evidence). Neither Codex path is usable on the
@@ -3186,13 +3002,7 @@ fi
 # carrier, and this host only delivers it. The validated --traceparent value
 # then IS the decision, so the enablement snapshot handed to the new Secondmate
 # agrees with the carrier it receives exactly as on the local path.
-if [ "$HARNESS" = omp ]; then
-  # omp is deliberately outside trace propagation until its live worker path
-  # is approved. This overrides both the frozen home decision and any ambient
-  # carrier; the launch template also removes TRACEPARENT from the child.
-  SPAWN_TRACE_EFFECTIVE=off
-  SPAWN_TRACEPARENT=
-elif [ "$TRACEPARENT_SET" -eq 1 ]; then
+if [ "$TRACEPARENT_SET" -eq 1 ]; then
   SPAWN_TRACE_EFFECTIVE=on
   SPAWN_TRACEPARENT=$TRACEPARENT_ARG
 else
@@ -3313,10 +3123,6 @@ fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
-sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
-sq_ompagentdir=$(shell_quote "${OMP_AGENT_DIR:-}")
-sq_ompcwd=$(shell_quote "${OMP_CWD:-}")
-sq_ompmodel=$(shell_quote "$MODEL")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
@@ -3328,10 +3134,6 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
-LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
-LAUNCH=${LAUNCH//__OMPAGENTDIR__/$sq_ompagentdir}
-LAUNCH=${LAUNCH//__OMPCWD__/$sq_ompcwd}
-LAUNCH=${LAUNCH//__OMPMODEL__/$sq_ompmodel}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}

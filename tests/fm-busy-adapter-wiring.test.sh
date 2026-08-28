@@ -50,9 +50,6 @@ esac
 SH
   chmod +x "$fakebin/orca"
   fm_fake_exit0 "$fakebin" treehouse pi opencode claude codex
-  # omp is version-pinned, so its stub has to answer the adapter's one identity
-  # probe; the installed Oh My Pi asset is never executed by these tests.
-  fm_fake_version_tool "$fakebin" omp FM_FAKE_OMP_VERSION omp/17.2.9
   printf '%s\n' "$fakebin"
 }
 
@@ -192,21 +189,6 @@ test_pi_extension_stale_incarnation_rejected() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale extension event must not change state, got '$out'"
   pass "pi extension events from a superseded incarnation are rejected as stale"
-}
-
-test_omp_remains_untrusted_until_lifecycle_proof() {
-  local state id=busy-omp-untrusted gen out
-  state="$TMP_ROOT/omp-untrusted/state"
-  mkdir -p "$state"
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id") \
-    || fail "could not arm the OMP untrusted-source fixture"
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle \
-    --gen "$gen" --source omp-ext --event agent-end \
-    || fail "could not seed the OMP untrusted-source fixture"
-  out=$(classify omp "$id" "$state")
-  [ "$out" = "unknown omp-unverified" ] \
-    || fail "OMP must ignore an unverified semantic idle verdict, got '$out'"
-  pass "OMP operational verdicts remain unknown until live lifecycle proof"
 }
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
@@ -377,7 +359,6 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
-test_omp_remains_untrusted_until_lifecycle_proof
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
