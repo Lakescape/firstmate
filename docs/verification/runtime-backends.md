@@ -993,12 +993,3 @@ Evidence produced 2026-08-23 on macOS 26.5.0 arm64, Node v24.14.1:
 
 Scope of this evidence: the installed signed `pi` CLI (0.84.1 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running both commands above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
-
-## OMP inert review artifact
-
-On 2026-08-27, `bash tests/fm-omp-harness.test.sh` verifies that the static requested-manifest renderer accepts no caller executable or file descriptor and that every production OMP selection fails before an OMP executable, provider, endpoint, worktree, metadata, extension, or submission is reached.
-The test uses an observable fake executable and requires it to remain unexecuted for explicit, positional, configured, raw, and batch selection forms.
-It does not resolve, install, version-probe, or execute OMP, another adapter, or a provider.
-
-No effective configuration, tool registry, command containment, lifecycle, backend, or provider behavior is claimed.
-The [harness-adapters skill](../../.agents/skills/harness-adapters/SKILL.md#omp-inert-review-artifact---oh-my-pi) records those runnable boundaries as separately scoped follow-up work.

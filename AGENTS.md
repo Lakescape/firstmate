@@ -194,14 +194,9 @@ A silent bootstrap section needs no action; for any printed actionable diagnosti
 
 Load `harness-adapters` before every spawn or recovery and before trust handling, skill invocation, interrupt, exit, resume, or adapter verification.
 The verified harnesses are `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, and `cursor`, plus `muse` for crewmates and scouts only; never dispatch on an unverified adapter.
-`omp` (Oh My Pi) is an inert, non-dispatchable review artifact, not an adapter.
-Every OMP selection is refused without resolving or executing OMP, another adapter, a provider, a caller-selected executable, or a caller-provided file descriptor.
-Do not dispatch work on it or describe it as containment-complete, supervised, runnable, or live-verified.
-Runnable OMP provenance, activation, containment, and lifecycle control require separately scoped follow-up work.
 If static `config/crew-harness` or `config/secondmate-harness` names an unverified adapter, report it and fall back only to a verified adapter rather than launching it.
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns general launch flags and fail-closed validation.
-For OMP specifically, `bin/fm-spawn.sh` owns the unconditional non-dispatchable refusal, while `bin/fm-omp-candidate-artifacts.sh` owns only the static requested manifest.
 When dispatch profiles exist, consult them at every crewmate or scout intake and pass the resolved concrete profile required by `fm-spawn`.
 Routing precedence is an explicit per-task captain override, then the best-fit configured rule, then the configured default, then the static crewmate harness.
 Firstmate alone resolves a matched profile array: begin with `quota-axi`'s default TOON at that intake, using the skill's narrow TOON-then-`--json` fallback only for genuine ambiguity, evaluate every configured candidate against that current output, and choose with inspectable `spendPriority` as the one quota-perspective ranker after the skill's eligibility, reasoning-class, and runway-feasibility gates.

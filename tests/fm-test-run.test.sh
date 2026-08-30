@@ -165,7 +165,7 @@ test_changed_dependency_selection_and_unmapped_failure() {
 
   printf '\n' >>"$repo/bin/fm-spawn.sh"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-omp-harness.test.sh" "spawn changes select OMP policy coverage"
+  assert_contains "$listed" "tests/fm-omp-harness.test.sh" "spawn changes select removed-adapter harness coverage"
   git -C "$repo" add bin/fm-spawn.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm spawn-change
 

@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse, plus the inert OMP review artifact.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and muse.
 user-invocable: false
 metadata:
   internal: true
@@ -534,15 +534,3 @@ A teardown refusal naming muse scratch is therefore correct behavior: inspect it
 muse is a day-0 `0.1.0` beta whose launcher polls a release channel hourly and can replace the running binary underneath the fleet, changing the process name with it.
 The captain accepted that risk, so firstmate does NOT set `MUSE_NO_AUTO_UPDATE=1`; a fleet that later wants stability can set it in the launch environment without any adapter change.
 Its plugin/hook engine reports `plugins are not available in this build` unless `MUSE_EXPERIMENTAL_PLUGINS=on`, which is why the busy source reads the session log instead of installing a hook.
-
-## omp (INERT REVIEW ARTIFACT - Oh My Pi)
-
-Oh My Pi is not a First Mate adapter in this scope.
-It is a non-dispatchable review artifact with no executable resolution, version or help probe, provider or backend selection, launch template, input submission, lifecycle extension, busy-state source, teardown artifact, or live-harness test.
-`bin/fm-spawn.sh` refuses every explicit, positional, configured, relaunch, batch, or raw OMP selection before runtime mutation and without executing OMP or another adapter.
-`bin/fm-omp-candidate-artifacts.sh requested-manifest` renders the static requested boundary and accepts no executable, file descriptor, path, model, extension, provider, or command input.
-The manifest records requests, not effective consumer behavior.
-Portable non-execution and refusal regressions live in `tests/fm-omp-harness.test.sh`.
-
-Separately scoped follow-up work must own every runnable boundary: immutable executable provenance and activation authority, exact model/provider and backend policy, session-free effective configuration and tool-containment proof, command/input containment, lifecycle events, interrupt/exit/relaunch control, operational classification, cleanup, and a captain-approved live pilot.
-None of those boundaries may be inferred from or added to this inert artifact.

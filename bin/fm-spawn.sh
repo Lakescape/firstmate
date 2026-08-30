@@ -109,10 +109,8 @@
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. A raw launch must be one literal, space-delimited command whose
 #   words contain no shell quoting, expansion, redirection, globbing, or compound
-#   operators. Any word that names omp, including one behind ordinary assignment,
-#   env, or command prefixes, is refused before mutation; OMP is an inert review
-#   artifact and has no production launch template. env split-string modes are
-#   also refused because they introduce a second command parser.
+#   operators. env split-string modes are also refused because they introduce a
+#   second command parser.
 #   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
@@ -182,15 +180,6 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# omp (Oh My Pi) is an inert, non-dispatchable review artifact.
-# Every explicit, positional, configured, relaunch, batch, or raw selection is
-# refused before any OMP executable, provider, endpoint, worktree, task state,
-# configuration, registry, metadata, extension, or submission can be reached.
-# bin/fm-omp-candidate-artifacts.sh owns only a static requested manifest.
-# It accepts no caller executable, file descriptor, path, model, extension,
-# provider, or command and creates no runtime artifact.
-# Runnable adapter provenance, activation, containment, and lifecycle control
-# belong to separately scoped follow-up work and are absent from this script.
 # If an Orca allocation cannot be released during aborted spawn cleanup, this
 # script atomically publishes a cleanup-only recovery record without replacing
 # an existing task record. A failed terminal close after successful worktree
@@ -423,14 +412,6 @@ else
   fi
 fi
 
-# OMP has no production adapter boundary.
-# This refusal is deliberately independent of executable, version, model,
-# provider, backend, and lifecycle state so no probe can precede it.
-refuse_omp_inert_artifact() {
-  echo "error: omp is an inert, non-dispatchable review artifact; First Mate has no OMP launch template and will not resolve or execute an OMP command" >&2
-  return 1
-}
-
 # --- effective selection, resolved once and before anything mutates ----------
 
 # A relaunch may use its durable record for early adapter policy only after it
@@ -604,14 +585,14 @@ fi
 # would actually launch has to be known before the watcher guard runs and before
 # anything is created. A --relaunch still adopts every identity axis from the
 # task's own durable record under the task's locks; those locks bind the
-# preflight snapshot before the inert OMP refusal runs.
+# preflight snapshot before launch resolution runs.
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
 if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_IS_BATCH" -eq 0 ]; then
   if [ "$KIND" = secondmate ]; then
     case "${POS[1]:-}" in
-      ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
+      ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
         ARG3=${POS[1]:-}
         ;;
       *' '*)
@@ -633,122 +614,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_IS_BATCH" -eq 0 ]; then
   fi
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
-
-# Validate the raw launch as one literal argv-shaped command, then return the
-# basename it claims. This deliberately does not emulate a shell parser: quoting,
-# expansion, redirection, globbing, and compound expressions are refused before
-# mutation. Every literal word is checked for omp before assignment/env prefix
-# handling, so wrappers such as `command omp` cannot disguise the candidate.
-spawn_raw_launch_identity() {
-  local raw=$1 word base env_mode=0 skip_env_arg=0
-  local safe_shape='^[A-Za-z0-9_./:@%+=,-]+( [A-Za-z0-9_./:@%+=,-]+)*$'
-  [[ $raw =~ $safe_shape ]] || return 1
-
-  # Unquoted splitting is safe only after safe_shape has excluded every shell
-  # syntax character and every whitespace byte except the literal separator.
-  # Reject omp in any argv position before interpreting harmless prefixes.
-  # shellcheck disable=SC2086
-  for word in $raw; do
-    base=${word##*/}
-    if [ "$base" = omp ]; then
-      printf '%s\n' omp
-      return 0
-    fi
-  done
-
-  # Unquoted split matches the raw-launch branch. This is an identity check,
-  # not a shell parser; validation above makes the shell's input one simple
-  # literal command while this recognizes ordinary assignment/env prefixes.
-  # shellcheck disable=SC2086
-  for word in $raw; do
-    if [ "$skip_env_arg" -eq 1 ]; then
-      skip_env_arg=0
-      continue
-    fi
-    if [ "$env_mode" -eq 1 ]; then
-      case "$word" in
-        --) env_mode=2; continue ;;
-        -u|--unset|-C|--chdir|-S|--split-string) skip_env_arg=1; continue ;;
-        -S?*|--split-string=*) return 1 ;;
-        --unset=*|--chdir=*|-i|--ignore-environment|-0|--null|-v|--debug) continue ;;
-        -*) continue ;;
-        [A-Za-z_]*=*) continue ;;
-      esac
-      basename "$word"
-      return 0
-    fi
-    case "$word" in
-      [A-Za-z_]*=*) continue ;;
-      *)
-        base=$(basename "$word")
-        if [ "$base" = env ]; then
-          env_mode=1
-          continue
-        fi
-        printf '%s\n' "$base"
-        return 0
-        ;;
-    esac
-  done
-  return 1
-}
-
-RAW_LAUNCH_IDENTITY=
-case "$ARG3" in
-  *' '*)
-    if ! RAW_LAUNCH_IDENTITY=$(spawn_raw_launch_identity "$ARG3"); then
-      echo "error: raw launch command must be one literal command with space-delimited words; shell quoting, expansion, redirection, globbing, compound expressions, and nested argument parsing are refused" >&2
-      exit 1
-    fi
-    ;;
-esac
-
-# Does this invocation select omp? Read exactly the way the launch path resolves
-# the harness below - an explicit --harness, then the back-compat positional
-# argument, then this home's configured crew/secondmate harness - without copying
-# any adapter table. A raw launch command claims omp when its effective command
-# resolves to omp, so ordinary assignment and env wrappers cannot evade the
-# same guards.
-spawn_selection_is_omp() {
-  local configured=
-  local identity=
-  case "$ARG3" in
-    *' '*)
-      identity=$RAW_LAUNCH_IDENTITY
-      [ "$identity" = omp ]
-      return
-      ;;
-    omp) return 0 ;;
-    '') : ;;
-    *) return 1 ;;
-  esac
-  # A relaunch with no explicit harness adopts the recorded harness. The task's
-  # lifecycle and metadata locks bind this preflight snapshot before the inert
-  # refusal; normal locked endpoint validation remains authoritative.
-  if [ "$RELAUNCH" -eq 1 ]; then
-    configured=$(relaunch_preflight_meta_get harness)
-    [ "$configured" = omp ]
-    return
-  fi
-  if [ "$KIND" = secondmate ]; then
-    configured=$("$FM_ROOT/bin/fm-harness.sh" secondmate 2>/dev/null || true)
-  elif [ ! -f "$CONFIG/crew-dispatch.json" ]; then
-    # With a dispatch profile active the launch path refuses an implicit harness
-    # instead of reading config/crew-harness, so neither does this.
-    configured=$("$FM_ROOT/bin/fm-harness.sh" crew 2>/dev/null || true)
-  fi
-  [ "$configured" = omp ]
-}
-
-# Every OMP refusal for a fresh spawn lands here before the watcher guard, batch
-# re-exec, per-task spawn lock, or mutation. A relaunch reaches the same gate only
-# after its lifecycle and metadata locks bind the stable snapshot, and still
-# before watcher, endpoint, worktree, task-state, configuration, registry,
-# metadata, or submission mutation. The gate recognizes explicit, positional,
-# configured, batch, and raw selections and performs no executable probe.
-if spawn_selection_is_omp; then
-  refuse_omp_inert_artifact || exit 1
-fi
 
 # Now the fresh-spawn watcher guard, which writes home state. Relaunch runs it
 # only after the task's lifecycle and metadata locks bind and validate the final
@@ -1614,13 +1479,6 @@ esac
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = muse ]; then
   echo "error: muse is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
-fi
-
-# The early refusal covers every fresh-spawn selection shape, including a raw
-# launch that claims OMP, and every relaunch the read-only preflight can classify.
-# This is defense in depth for an unexpected OMP identity after resolution.
-if [ "$RELAUNCH" -eq 1 ] && [ "$HARNESS" = omp ]; then
-  refuse_omp_inert_artifact || exit 1
 fi
 
 case "$HARNESS" in

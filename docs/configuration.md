@@ -235,14 +235,10 @@ Cursor typed-submit confirmation is verified on tmux and Herdr only.
 On Zellij, cmux, and Orca a typed-plane Cursor send (a harness-native invocation or an explicit backend target; ordinary text steers ride the durable inbox and exit 0 at enqueue) lands, but `fm-send` reports delivery unconfirmed and exits non-zero because their shared submit core does not consult the busy footer; [runtime backend verification](verification/runtime-backends.md#cursor-agent-cli) owns the evidence and transcript-state boundary.
 muse is verified for crewmate and scout launches ONLY, and `fm-spawn.sh` refuses it for a secondmate, because muse ships no usable hook surface for a primary session's turn-end supervision; [`docs/verification/muse.md`](verification/muse.md) owns that evidence.
 muse also needs a worker-reachable credential before spawning, and the portable fleet path is the `<config>/muse/auth.json` credential stored by `muse login`, because a caller-only `META_API_KEY` does not cross a long-lived backend daemon.
-omp (Oh My Pi) is an inert, non-dispatchable review artifact rather than an adapter.
-Every selection is refused before executable resolution or runtime mutation.
-The [`fm-spawn.sh` usage contract](../bin/fm-spawn.sh) owns that unconditional refusal.
-[`fm-omp-candidate-artifacts.sh`](../bin/fm-omp-candidate-artifacts.sh) owns only the static requested manifest; the [harness-adapters skill](../.agents/skills/harness-adapters/SKILL.md) records the separately scoped follow-up boundaries; and [runtime backend verification](verification/runtime-backends.md#omp-inert-review-artifact) records the non-execution evidence.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
-Launch mechanics for verified adapters, including their command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh); OMP has no launch mechanics.
+Launch mechanics for verified adapters, including their command templates, live in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh).
 Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabilities; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact version-safe launch mechanics.
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.

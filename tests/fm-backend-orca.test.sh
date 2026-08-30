@@ -1055,44 +1055,6 @@ test_spawn_preserves_terminal_only_recovery_until_close_succeeds() {
   pass "Orca terminal-only recovery advances before later fallible cleanup"
 }
 
-test_spawn_refuses_inert_omp_before_orca_allocation() {
-  local proj wt data state config id out log fakebin rc sentinel
-  id="orcaompz1"
-  proj="$TMP_ROOT/omp-project"
-  wt="$TMP_ROOT/omp-wt"
-  data="$TMP_ROOT/omp-data"
-  state="$TMP_ROOT/omp-state"
-  config="$TMP_ROOT/omp-config"
-  fm_git_worktree "$proj" "$wt" "fm/$id"
-  mkdir -p "$data/$id" "$state" "$config"
-  printf 'brief\n' > "$data/$id/brief.md"
-  touch "$state/.last-watcher-beat"
-  orca_case omp-spawn
-  log="$LOG"
-  fakebin="$FB"
-  sentinel="$TMP_ROOT/omp-executed"
-  cat > "$fakebin/omp" <<'SH'
-#!/usr/bin/env bash
-printf 'executed\n' >> "${FM_OMP_EXECUTION_SENTINEL:?}"
-exit 97
-SH
-  chmod +x "$fakebin/omp"
-  set +e
-  out=$( PATH="$fakebin:$PATH" FM_OMP_EXECUTION_SENTINEL="$sentinel" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-omp-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --harness omp --model anthropic/claude-sonnet-4-5 \
-      --mode no-mistakes --yolo off --backend orca 2>&1 )
-  rc=$?
-  expect_code 1 "$rc" "inert omp spawn should be refused"$'\n'"$out"
-  assert_contains "$out" "omp is an inert, non-dispatchable review artifact" \
-    "inert omp refusal did not name the non-dispatchable boundary"
-  assert_absent "$sentinel" "inert omp refusal executed the PATH-selected candidate"
-  [ ! -s "$log" ] || fail "inert omp refusal allocated or dispatched through Orca"
-  assert_absent "$state/$id.meta" "inert omp refusal wrote task metadata"
-  pass "fm-spawn.sh --backend orca: refuses inert omp before executable or allocation access"
-}
-
 test_peek_send_and_crew_state_route_through_orca_meta() {
   local wt state id out neutral record body
   id="orcaiopathz2"
@@ -1833,7 +1795,6 @@ test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_orca_recovery_publication_never_replaces_a_racing_task_record
-test_spawn_refuses_inert_omp_before_orca_allocation
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_spawn_recovers_from_partial_orca_metadata_render
 test_spawn_preserves_terminal_only_recovery_until_close_succeeds
