@@ -1011,6 +1011,10 @@ The OMP adapter and manifest are review-only.
 They may report requested and rendered settings for exact `omp/17.2.9`, but those records are not effective consumer proof; effective configuration, fallback isolation, and effective tool construction remain explicitly unproven.
 No supported session-free consumer pinned to that exact artifact has been established.
 
+Two measured findings bound which consumer surfaces remain worth attempting.
+On 2026-08-24, source review invalidated an earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it falls outside this candidate's no-session and no-network verification authority.
+The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove `omp/17.2.9` behavior.
+
 The opt-in proof gate fails closed without resolving or executing any OMP candidate:
 
 ```sh
