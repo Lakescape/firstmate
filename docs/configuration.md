@@ -306,6 +306,7 @@ gemini is likewise refused for secondmates because it has no primary supervision
 omp (Oh My Pi) is a candidate crewmate/scout adapter rather than a verified one.
 Its pinned 17.2.9 effective configuration and effective tool registry remain unproven because no supported matching session-free importable consumer artifact is available.
 Every runnable launch remains refused until immutable executable provenance, that consumer proof, and the separate ATX-2170 First Mate interrupt, exit, and relaunch proof all pass; no mandatory prerequisite substitutes for another.
+While those OMP dormancy gates remain closed, every local raw launch command is also refused before backend validation, locks, or state mutation. Shell indirection makes a raw program's eventual executable unknowable at intake, so local launches must select an explicit named harness.
 First Mate remains its sole supervisor, and tmux is the only backend allowed for bounded candidate development.
 The [`fm-spawn.sh` usage contract](../bin/fm-spawn.sh) owns explicit selection, hard dormancy, model, backend, relaunch, and trace ordering.
 [`fm-omp-candidate-artifacts.sh`](../bin/fm-omp-candidate-artifacts.sh) owns exact flags, environment isolation, requested tool containment, and input policy.
@@ -330,7 +331,7 @@ When the harness token is absent or `default`, secondmate launch falls back thro
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
 An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
+An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit named harness starts with clean model and effort defaults unless those flags are also passed. Raw launch commands remain disabled while OMP is dormant.
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.

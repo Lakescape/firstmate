@@ -113,8 +113,9 @@
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|omp)
 #   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   whitespace is a RAW launch command. Local raw launches remain disabled while
+#   OMP is dormant because shell indirection cannot prove which executable they
+#   select; use an explicit named harness. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -502,15 +503,6 @@ require_omp_tmux_backend() {
     echo "error: omp requires backend=tmux for bounded candidate development; resolved backend '$BACKEND' is not authorized for this adapter" >&2
     return 1
   fi
-}
-
-# Raw launch text is never executed to classify this candidate.
-# Any whitespace-delimited word whose basename is the candidate command claims
-# the OMP identity and must use the named adapter path instead.
-raw_launch_selects_omp() {
-  local raw=$1
-  local pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?omp([[:space:];|&()]|$)'
-  [[ $raw =~ $pattern ]]
 }
 
 spawn_remote_secondmate() {
@@ -1063,6 +1055,44 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+
+# A raw command is a shell program, not an adapter identity. While OMP remains
+# dormant, no static token classifier can prove that variable expansion,
+# command substitution, a nested shell, eval, a function, or an arbitrary path
+# will not resolve to OMP. Classify the local raw-command argument before every
+# lock, backend probe, state directory creation, or other spawn mutation and
+# close the whole escape hatch until the OMP gates are lifted.
+local_raw_launch_requested() {
+  local candidate=
+  if [ -n "$HARNESS_ARG" ]; then
+    candidate=$HARNESS_ARG
+  elif [ "$RELAUNCH" -eq 1 ]; then
+    return 1
+  elif [ "$KIND" = secondmate ]; then
+    case "${POS[1]:-}" in
+      *[[:space:]]*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+          candidate=${POS[2]:-}
+        else
+          candidate=${POS[1]}
+        fi
+        ;;
+      *) candidate=${POS[2]:-} ;;
+    esac
+  else
+    candidate=${POS[2]:-}
+  fi
+  case "$candidate" in
+    *[[:space:]]*) return 0 ;;
+  esac
+  return 1
+}
+
+if local_raw_launch_requested; then
+  echo "error: local raw launch commands are disabled while omp is dormant because shell indirection cannot prove that the command will not select omp; select an explicit named harness" >&2
+  exit 1
+fi
+
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
     echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -1460,17 +1490,9 @@ launch_template() {
 }
 
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
-    if raw_launch_selects_omp "$ARG3"; then
-      echo "error: every omp spawn and relaunch requires an explicit --harness omp selection; raw, positional, and inherited paths never select it" >&2
-      exit 1
-    fi
-    RAW_LAUNCH=1
-    LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+  *' '*)
+    echo "error: internal raw-launch dormancy guard failed to classify a local raw command" >&2
+    exit 1
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the

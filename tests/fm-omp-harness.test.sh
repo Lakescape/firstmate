@@ -223,6 +223,75 @@ EOF
   fi
 }
 
+tree_fingerprint() {
+  local root=$1
+  {
+    find "$root" -mindepth 1 -print | LC_ALL=C sort
+    find "$root" -type f -exec cksum {} \; | LC_ALL=C sort
+    find "$root" -type l -exec readlink {} \; | LC_ALL=C sort
+  }
+}
+
+test_local_raw_launches_refuse_while_omp_is_dormant() {
+  local raw name record home fakebin sentinel launch_log before after out status rows=0
+  local expected='local raw launch commands are disabled while omp is dormant'
+  while IFS='|' read -r name raw; do
+    [ -n "$name" ] || continue
+    record=$(make_refusal_case "raw-$name" '')
+    IFS='|' read -r home fakebin sentinel <<EOF
+$record
+EOF
+    mkdir -p "$home/user-home"
+    launch_log="$TMP_ROOT/raw-$name.launch"
+    before=$(tree_fingerprint "$home")
+    out=$(FM_OMP_EXECUTION_SENTINEL="$sentinel" FM_FAKE_LAUNCH_LOG="$launch_log" \
+      fm_test_run_spawn "$home" /not-a-pane "$fakebin" \
+      "task-raw-$name" /not-a-project "$raw" --backend invalid \
+      --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "raw $name unexpectedly dispatched while omp is dormant"
+    assert_contains "$out" "$expected" "raw $name did not reach the dormant raw-launch refusal: $out"
+    assert_absent "$sentinel" "raw $name executed the candidate"
+    assert_absent "$launch_log" "raw $name delivered launch bytes to the backend"
+    after=$(tree_fingerprint "$home")
+    [ "$after" = "$before" ] || fail "raw $name mutated the First Mate home before refusing"
+    rows=$((rows + 1))
+  done <<'EOF'
+literal-omp|omp --version
+env-omp|env omp --version
+variable-expansion|env "$OMP_BIN" --version
+shell-command|sh -c 'omp --version'
+eval-command|eval 'omp --version'
+command-substitution|sh -c '"$(command -v omp)" --version'
+path-indirection|"$OMP_HOME/bin/omp" --version
+unverified-adapter|someunverifiedagent --flag
+EOF
+  [ "$rows" -eq 8 ] || fail "raw dormant matrix must carry 8 rows, found $rows"
+  pass "raw dormant matrix: $rows/8 local raw launch shapes refuse before every home mutation and without OMP execution"
+}
+
+test_named_harness_negative_controls_bypass_raw_refusal() {
+  local name record home fakebin sentinel out status rows=0
+  for name in claude codex; do
+    record=$(make_refusal_case "named-$name" '')
+    IFS='|' read -r home fakebin sentinel <<EOF
+$record
+EOF
+    out=$(FM_OMP_EXECUTION_SENTINEL="$sentinel" \
+      fm_test_run_spawn "$home" /not-a-pane "$fakebin" \
+      "task-named-$name" /not-a-project --harness "$name" --backend invalid \
+      --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "named $name negative control unexpectedly dispatched"
+    assert_contains "$out" "unknown backend 'invalid'" "named $name did not reach its ordinary backend validation: $out"
+    assert_not_contains "$out" "local raw launch commands are disabled" "named $name was misclassified as raw: $out"
+    assert_absent "$sentinel" "named $name negative control executed OMP"
+    rows=$((rows + 1))
+  done
+  [ "$rows" -eq 2 ] || fail "named harness negative controls must carry 2 rows, found $rows"
+  pass "named harness negative controls: $rows/2 named adapters remain outside the dormant raw-launch refusal"
+}
+
 test_spawn_policy_matrix_stays_dormant_and_tmux_only() {
   run_spawn_refusal explicit-dormant '' 'session-free omp/17.2.9 consumer'     task-explicit /not-a-project --harness omp --model "$OMP_MODEL"     --backend tmux --mode no-mistakes --yolo off
   run_spawn_refusal orca-refusal '' 'requires backend=tmux'     task-orca /not-a-project --harness omp --model "$OMP_MODEL"     --backend orca --mode no-mistakes --yolo off
@@ -230,7 +299,7 @@ test_spawn_policy_matrix_stays_dormant_and_tmux_only() {
   run_spawn_refusal malformed-model '' 'must be exactly'     task-malformed /not-a-project --harness omp --model model-only     --backend tmux --mode no-mistakes --yolo off
   run_spawn_refusal positional '' 'requires an explicit --harness omp'     task-positional /not-a-project omp --model "$OMP_MODEL"     --backend tmux --mode no-mistakes --yolo off
   run_spawn_refusal configured omp 'requires an explicit --harness omp'     task-configured /not-a-project --model "$OMP_MODEL"     --backend tmux --mode no-mistakes --yolo off
-  run_spawn_refusal raw '' 'requires an explicit --harness omp'     task-raw /not-a-project 'env omp --version' --model "$OMP_MODEL"     --backend tmux --mode no-mistakes --yolo off
+  run_spawn_refusal raw '' 'local raw launch commands are disabled while omp is dormant'     task-raw /not-a-project 'env omp --version' --model "$OMP_MODEL"     --backend tmux --mode no-mistakes --yolo off
   run_spawn_refusal secondmate '' 'candidate crewmate/scout adapter only'     task-secondmate --secondmate --harness omp --model "$OMP_MODEL"     --backend tmux
   pass "OMP selection, model, backend, role, and dormancy gates refuse without execution"
 }
@@ -239,6 +308,8 @@ test_omp_launch_request_is_rendered
 test_omp_manifest_routes_agent_tools_away_from_captain_claude_tools
 test_omp_consumer_proof_gate_never_executes_candidate
 test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation
+test_local_raw_launches_refuse_while_omp_is_dormant
+test_named_harness_negative_controls_bypass_raw_refusal
 test_spawn_policy_matrix_stays_dormant_and_tmux_only
 
 echo "all fm-omp-harness tests passed"
