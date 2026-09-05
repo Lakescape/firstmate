@@ -323,6 +323,21 @@ for a in "$@"; do
   esac
 done
 
+positional_id_repo_pair_requested() {
+  local idpart=${POS[0]:-}
+  [ -n "$idpart" ] || return 1
+  [ "$idpart" != "${idpart%%=*}" ]
+}
+
+batch_dispatch_requested() {
+  local idpart=${POS[0]:-}
+  positional_id_repo_pair_requested || return 1
+  idpart=${idpart%%=*}
+  case "$idpart" in
+    */*) return 1 ;;
+  esac
+}
+
 # A raw command is a shell program, not an adapter identity. While OMP remains
 # dormant, no static token classifier can prove that variable expansion,
 # command substitution, a nested shell, eval, a function, or an arbitrary path
@@ -334,6 +349,8 @@ local_raw_launch_requested() {
   if [ -n "$HARNESS_ARG" ]; then
     candidate=$HARNESS_ARG
   elif [ "$RELAUNCH" -eq 1 ]; then
+    return 1
+  elif batch_dispatch_requested; then
     return 1
   elif [ "$KIND" = secondmate ]; then
     case "${POS[1]:-}" in
@@ -1053,13 +1070,11 @@ spawn_herdr_presentation_order_lock_release() {
 # the single path verbatim. A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
-if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ]; then
+if [ "$RELAUNCH" -eq 1 ] && positional_id_repo_pair_requested; then
   echo "error: --relaunch is single-task only; relaunch each task explicitly" >&2
   exit 1
 fi
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+if batch_dispatch_requested; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1

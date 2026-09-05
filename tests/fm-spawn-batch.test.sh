@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-spawn.sh batch dispatch (`id=repo` pairs).
 #
-# These exercise argument routing only: each spawn attempt fails fast at the
-# missing-brief check, which is reached before any tmux/treehouse side effect, so
-# the tests create no windows or worktrees. FM_SPAWN_NO_GUARD=1 keeps them off the
-# live watcher guard / state. Parser and path-scoping cases are table-driven; the
-# only behavior asserted on its own is "a multi-pair batch does not stop after the
-# first failure".
+# These exercise argument routing and dormant raw classification through spawn failures before any tmux or treehouse side effect.
+# The tests create no windows or worktrees, and FM_SPAWN_NO_GUARD=1 keeps them off the live watcher guard and state.
+# Parser and path-scoping cases are table-driven, while continuation, whitespace-path, and shared raw-harness behavior are asserted independently.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -46,6 +43,40 @@ test_batch_dispatches_every_pair() {
   printf '%s\n' "$out" | grep -F 'batch: FAILED to spawn nope-batch-b-z2 (projects/none-b)' >/dev/null \
     || fail "second pair was not dispatched/reported (loop stopped early?)"
   pass "batch dispatch re-execs and reports every id=repo pair"
+}
+
+test_batch_repository_spaces_do_not_trigger_raw_refusal() {
+  local home out status third_project
+  home="$TMP_ROOT/named-harness-home"
+  third_project="$TMP_ROOT/project With Spaces"
+  mkdir -p "$home/config"
+  printf '%s\n' codex > "$home/config/crew-harness"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' FM_HOME="$home" \
+    FM_SPAWN_NO_GUARD=1 "$SPAWN" \
+    nope-spaces-a=projects/none-a nope-spaces-b=projects/none-b \
+    "nope-spaces-c=$third_project" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch with missing briefs should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'local raw launch commands are disabled' >/dev/null \
+    && fail "whitespace repository path was misclassified as a raw launch"
+  printf '%s\n' "$out" | grep -F "batch: FAILED to spawn nope-spaces-c ($third_project)" >/dev/null \
+    || fail "whitespace repository path did not reach batch dispatch"
+  pass "batch repository spaces reach batch parsing with configured harness"
+}
+
+test_batch_shared_raw_harness_still_refuses() {
+  local out status
+  out=$(run_ship_spawn nope-raw-a=projects/none-a \
+    "nope-raw-b=$TMP_ROOT/project With Spaces" --harness 'env omp --version')
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch raw harness unexpectedly dispatched"
+  printf '%s\n' "$out" | grep -F 'local raw launch commands are disabled while omp is dormant' >/dev/null \
+    || fail "batch raw harness did not reach the dormant refusal"
+  printf '%s\n' "$out" | grep -F 'batch:' >/dev/null \
+    && fail "batch raw harness dispatched pairs before refusal"
+  pass "batch shared raw harness remains dormant"
 }
 
 # Boundary cases for batch detection. Each row:
@@ -142,6 +173,8 @@ test_scout_batch_refuses_delivery_flags() {
 }
 
 test_batch_dispatches_every_pair
+test_batch_repository_spaces_do_not_trigger_raw_refusal
+test_batch_shared_raw_harness_still_refuses
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
