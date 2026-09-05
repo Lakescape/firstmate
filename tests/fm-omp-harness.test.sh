@@ -242,11 +242,17 @@ test_local_raw_launches_refuse_while_omp_is_dormant() {
 $record
 EOF
     mkdir -p "$home/user-home"
+    printf 'stale warning\n' > "$home/state/.guard-watcher-stale-banner"
     launch_log="$TMP_ROOT/raw-$name.launch"
     before=$(tree_fingerprint "$home")
     out=$(FM_OMP_EXECUTION_SENTINEL="$sentinel" FM_FAKE_LAUNCH_LOG="$launch_log" \
-      fm_test_run_spawn "$home" /not-a-pane "$fakebin" \
-      "task-raw-$name" /not-a-project "$raw" --backend invalid \
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" \
+      CLAUDE_CONFIG_DIR='' FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_PROJECTS_OVERRIDE="$home/projects" \
+      FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD='' \
+      FM_FAKE_PANE_PATH=/not-a-pane TMUX=fake,1,0 PATH="$fakebin:$PATH" \
+      "$ROOT/bin/fm-spawn.sh" \
+      "task-raw-$name" /not-a-project "$raw" --backend tmux \
       --mode no-mistakes --yolo off 2>&1)
     status=$?
     [ "$status" -ne 0 ] || fail "raw $name unexpectedly dispatched while omp is dormant"

@@ -264,6 +264,103 @@ case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
 
+KIND=ship
+KIND_SET=0
+HARNESS_ARG=
+MODEL=
+EFFORT=
+BACKEND_ARG=
+MODE=
+YOLO=
+TRACEPARENT_ARG=
+HARNESS_SET=0
+MODEL_SET=0
+EFFORT_SET=0
+BACKEND_SET=0
+MODE_SET=0
+YOLO_SET=0
+TRACEPARENT_SET=0
+RELAUNCH=0
+POS=()
+want_value=
+for a in "$@"; do
+  if [ -n "$want_value" ]; then
+    case "$a" in
+      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    esac
+    case "$want_value" in
+      harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
+      model) MODEL=$a; MODEL_SET=1 ;;
+      effort) EFFORT=$a; EFFORT_SET=1 ;;
+      backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      mode) MODE=$a; MODE_SET=1 ;;
+      yolo) YOLO=$a; YOLO_SET=1 ;;
+      traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
+    esac
+    want_value=
+    continue
+  fi
+  case "$a" in
+    --scout) KIND=scout; KIND_SET=1 ;;
+    --secondmate) KIND=secondmate; KIND_SET=1 ;;
+    --relaunch) RELAUNCH=1 ;;
+    --harness) want_value=harness ;;
+    --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
+    --model) want_value=model ;;
+    --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
+    --effort) want_value=effort ;;
+    --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
+    --backend) want_value=backend ;;
+    --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --mode) want_value=mode ;;
+    --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --yolo) want_value=yolo ;;
+    --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --traceparent) want_value=traceparent ;;
+    --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    *) POS+=("$a") ;;
+  esac
+done
+
+# A raw command is a shell program, not an adapter identity. While OMP remains
+# dormant, no static token classifier can prove that variable expansion,
+# command substitution, a nested shell, eval, a function, or an arbitrary path
+# will not resolve to OMP. Classify the local raw-command argument before every
+# lock, backend probe, state directory creation, or other spawn mutation and
+# close the whole escape hatch until the OMP gates are lifted.
+local_raw_launch_requested() {
+  local candidate=
+  if [ -n "$HARNESS_ARG" ]; then
+    candidate=$HARNESS_ARG
+  elif [ "$RELAUNCH" -eq 1 ]; then
+    return 1
+  elif [ "$KIND" = secondmate ]; then
+    case "${POS[1]:-}" in
+      *[[:space:]]*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+          candidate=${POS[2]:-}
+        else
+          candidate=${POS[1]}
+        fi
+        ;;
+      *) candidate=${POS[2]:-} ;;
+    esac
+  else
+    candidate=${POS[2]:-}
+  fi
+  case "$candidate" in
+    *[[:space:]]*) return 0 ;;
+  esac
+  return 1
+}
+
+if local_raw_launch_requested; then
+  echo "error: local raw launch commands are disabled while omp is dormant because shell indirection cannot prove that the command will not select omp; select an explicit named harness" >&2
+  exit 1
+fi
+
+
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -343,64 +440,6 @@ fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
-KIND=ship
-KIND_SET=0
-HARNESS_ARG=
-MODEL=
-EFFORT=
-BACKEND_ARG=
-MODE=
-YOLO=
-TRACEPARENT_ARG=
-HARNESS_SET=0
-MODEL_SET=0
-EFFORT_SET=0
-BACKEND_SET=0
-MODE_SET=0
-YOLO_SET=0
-TRACEPARENT_SET=0
-RELAUNCH=0
-POS=()
-want_value=
-for a in "$@"; do
-  if [ -n "$want_value" ]; then
-    case "$a" in
-      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
-    esac
-    case "$want_value" in
-      harness) HARNESS_ARG=$a; HARNESS_SET=1 ;;
-      model) MODEL=$a; MODEL_SET=1 ;;
-      effort) EFFORT=$a; EFFORT_SET=1 ;;
-      backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
-      mode) MODE=$a; MODE_SET=1 ;;
-      yolo) YOLO=$a; YOLO_SET=1 ;;
-      traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
-      *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
-    esac
-    want_value=
-    continue
-  fi
-  case "$a" in
-    --scout) KIND=scout; KIND_SET=1 ;;
-    --secondmate) KIND=secondmate; KIND_SET=1 ;;
-    --relaunch) RELAUNCH=1 ;;
-    --harness) want_value=harness ;;
-    --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
-    --model) want_value=model ;;
-    --model=*) MODEL=${a#--model=}; MODEL_SET=1 ;;
-    --effort) want_value=effort ;;
-    --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
-    --backend) want_value=backend ;;
-    --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
-    --mode) want_value=mode ;;
-    --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
-    --yolo) want_value=yolo ;;
-    --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
-    --traceparent) want_value=traceparent ;;
-    --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
-    *) POS+=("$a") ;;
-  esac
-done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || { echo "error: --harness requires a non-empty value" >&2; exit 1; }
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
@@ -1056,42 +1095,6 @@ fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 
-# A raw command is a shell program, not an adapter identity. While OMP remains
-# dormant, no static token classifier can prove that variable expansion,
-# command substitution, a nested shell, eval, a function, or an arbitrary path
-# will not resolve to OMP. Classify the local raw-command argument before every
-# lock, backend probe, state directory creation, or other spawn mutation and
-# close the whole escape hatch until the OMP gates are lifted.
-local_raw_launch_requested() {
-  local candidate=
-  if [ -n "$HARNESS_ARG" ]; then
-    candidate=$HARNESS_ARG
-  elif [ "$RELAUNCH" -eq 1 ]; then
-    return 1
-  elif [ "$KIND" = secondmate ]; then
-    case "${POS[1]:-}" in
-      *[[:space:]]*)
-        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
-          candidate=${POS[2]:-}
-        else
-          candidate=${POS[1]}
-        fi
-        ;;
-      *) candidate=${POS[2]:-} ;;
-    esac
-  else
-    candidate=${POS[2]:-}
-  fi
-  case "$candidate" in
-    *[[:space:]]*) return 0 ;;
-  esac
-  return 1
-}
-
-if local_raw_launch_requested; then
-  echo "error: local raw launch commands are disabled while omp is dormant because shell indirection cannot prove that the command will not select omp; select an explicit named harness" >&2
-  exit 1
-fi
 
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
