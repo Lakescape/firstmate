@@ -366,8 +366,8 @@ test_active_dispatch_profile_allows_positional_harness() {
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
-test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+test_active_dispatch_profile_refuses_raw_launch_while_omp_is_dormant() {
+  local rec id out status
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -376,12 +376,12 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id" "$PROJ_DIR" "custom-agent --flag")
   status=$?
-  expect_code 0 "$status" "raw launch command should satisfy active dispatch-profile requirement"
-  assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
-  launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
-  pass "active crew-dispatch profile allows the raw launch-command escape hatch"
+  expect_code 1 "$status" "raw launch command should refuse while omp is dormant"
+  assert_contains "$out" "local raw launch commands are disabled while omp is dormant" \
+    "raw launch did not reach the dormant policy refusal"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw launch refusal published task metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw launch refusal delivered backend bytes"
+  pass "active crew-dispatch profile preserves the dormant raw-launch refusal"
 }
 
 test_claude_threads_model_and_effort() {
@@ -805,7 +805,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
-test_active_dispatch_profile_allows_raw_launch_command
+test_active_dispatch_profile_refuses_raw_launch_while_omp_is_dormant
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
