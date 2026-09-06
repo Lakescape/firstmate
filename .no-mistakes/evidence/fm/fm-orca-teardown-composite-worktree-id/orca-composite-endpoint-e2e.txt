@@ -1,0 +1,51 @@
+=== End-user control path: composite ID with a spaced absolute path ===
+recorded_worktree_id=<vendor+opaque::/private/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T/orca-composite-evidence.Mukqmr/work tree>
+$ bin/fm-control.sh orca-e2e interrupt
+interrupt-delivered orca-e2e harness=grok backend=orca verified=endpoint cancel=unconfirmed
+exit_code=0
+Orca argv observed:
+orca argc=6 argv[1]=<terminal> argv[2]=<send> argv[3]=<--terminal> argv[4]=<term-e2e> argv[5]=<--interrupt> argv[6]=<--json>
+orca argc=7 argv[1]=<terminal> argv[2]=<read> argv[3]=<--terminal> argv[4]=<term-e2e> argv[5]=<--limit> argv[6]=<1> argv[7]=<--json>
+
+=== End-user teardown path: same complete composite reaches Orca as one argument ===
+$ bin/fm-teardown.sh orca-e2e
+teardown orca-e2e complete (window term-e2e, worktree /private/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T/orca-composite-evidence.Mukqmr/work tree)
+Backlog: orca-e2e just finished (this home keeps no backlog at /private/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T/orca-composite-evidence.Mukqmr/home/data/backlog.md). Update /private/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T/orca-composite-evidence.Mukqmr/home/data/backlog.md - move orca-e2e to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+exit_code=0
+Orca argv observed:
+orca argc=5 argv[1]=<worktree> argv[2]=<show> argv[3]=<--worktree> argv[4]=<id:vendor+opaque::/private/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T/orca-composite-evidence.Mukqmr/work tree> argv[5]=<--json>
+orca argc=5 argv[1]=<terminal> argv[2]=<close> argv[3]=<--terminal> argv[4]=<term-e2e> argv[5]=<--json>
+orca argc=6 argv[1]=<worktree> argv[2]=<rm> argv[3]=<--worktree> argv[4]=<id:vendor+opaque::/private/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T/orca-composite-evidence.Mukqmr/work tree> argv[5]=<--force> argv[6]=<--json>
+metadata_after=removed
+
+=== Hostile metadata: refusal happens before runtime or state mutation ===
+$ bin/fm-teardown.sh orca-hostile
+REFUSED: Orca endpoint metadata for task orca-hostile is malformed or inconsistent; preserving task state.
+exit_code=1
+metadata_after=present sentinel_after=present orca_calls=0
+
+=== Composite grammar matrix through executable validator logic ===
+valid-spaced-path      expected=ACCEPT actual=ACCEPT value=<vendor+opaque::/Volumes/Work Tree/task-1>
+bare-atom              expected=REJECT actual=REJECT value=<vendor+opaque>
+empty-left             expected=REJECT actual=REJECT value=<::/safe/worktree>
+empty-right            expected=REJECT actual=REJECT value=<vendor+opaque::>
+relative-path          expected=REJECT actual=REJECT value=<vendor+opaque::relative/worktree>
+two-separators         expected=REJECT actual=REJECT value=<vendor+opaque::/safe::/extra>
+left-semicolon         expected=REJECT actual=REJECT value=<vendor;bad::/safe/worktree>
+path-semicolon         expected=REJECT actual=REJECT value=<vendor+opaque::/safe/worktree;bad>
+path-ampersand         expected=REJECT actual=REJECT value=<vendor+opaque::/safe/worktree&bad>
+path-pipe              expected=REJECT actual=REJECT value=<vendor+opaque::/safe/worktree|bad>
+path-dollar            expected=REJECT actual=REJECT value=<vendor+opaque::/safe/$HOME>
+path-backtick          expected=REJECT actual=REJECT value=<vendor+opaque::/safe/`id`>
+path-newline           expected=REJECT actual=REJECT value=<vendor+opaque::/safe/worktree
+next>
+
+=== Generic atom validator remains narrow for non-Orca callers ===
+atom-safe              expected=ACCEPT actual=ACCEPT value=<atom_2+ok@vendor%3>
+atom-space             expected=REJECT actual=REJECT value=<two words>
+atom-colon             expected=REJECT actual=REJECT value=<atom:value>
+atom-path              expected=REJECT actual=REJECT value=</absolute/path>
+atom-semicolon         expected=REJECT actual=REJECT value=<atom;bad>
+
+=== Existing live record: validator-only compatibility check ===
+real_record=accepted backend=orca runtime_actions=0
