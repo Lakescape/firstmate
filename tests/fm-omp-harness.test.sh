@@ -107,8 +107,7 @@ make_omp_case() {  # <name> <crew-harness> <id> [omp-version|absent]
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
-  mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  fm_test_spawn_brief "$home" "$id"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
@@ -492,8 +491,7 @@ assert_omp_launch_refused() {  # <task-id> <expected-message> [extra spawn args.
   tmux_log="$CASE_DIR/tmux-sends-$id"
   : > "$stub_log"
   : > "$tmux_log"
-  mkdir -p "$HOME_DIR/data/$id"
-  printf 'brief for %s\n' "$id" > "$HOME_DIR/data/$id/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
   arm_ordering_probes "$id"
   out=$(FM_OMP_STUB_LOG="$stub_log" FM_TMUX_LOG="$tmux_log" \
     run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \
@@ -658,8 +656,7 @@ test_omp_selection_policy_matrix() {
   rec=$(make_omp_case omp-sel-batch claude omp-s4)
   read_case_record "$rec"
   guard_marker="$HOME_DIR/state/.guard-watcher-stale-banner"
-  mkdir -p "$HOME_DIR/data/omp-s4b"
-  printf 'brief for omp-s4b\n' > "$HOME_DIR/data/omp-s4b/brief.md"
+  fm_test_spawn_brief "$HOME_DIR" omp-s4b
   rows=$((rows + 1))
   arm_ordering_probes omp-s4
   out=$(run_spawn_guarded "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" \

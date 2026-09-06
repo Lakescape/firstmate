@@ -283,17 +283,11 @@ const busyEvent = (state: string, event: string) =>
   });
 export default function (omp: any) {
   omp.on("agent_start", () => busyEvent("busy", "agent-start"));
-  const settled = (event: any, ctx: any) => {
+  const settled = (event: any) => {
     if (event && event.willContinue === true) return;
-    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-end");
   };
-  for (const name of ["agent_end", "agent_settled"]) {
-    try {
-      omp.on(name, settled);
-    } catch (_err) {
-    }
-  }
+  omp.on("agent_end", settled);
   omp.on("turn_end", () => execFile("touch", [$turn_ended_js]));
 }
 EOF

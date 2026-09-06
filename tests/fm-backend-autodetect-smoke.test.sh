@@ -86,11 +86,24 @@ trap on_exit EXIT
 # --- scratch world: FM_HOME with NO backend config, one throwaway project ---
 
 STATE="$TMP_ROOT/state"; DATA="$TMP_ROOT/data"; CONFIG="$TMP_ROOT/config"
-mkdir -p "$STATE" "$DATA/$ID" "$CONFIG"
+FAKE_BIN="$TMP_ROOT/fake-bin"
+mkdir -p "$STATE" "$DATA/$ID" "$CONFIG" "$FAKE_BIN"
+cat > "$FAKE_BIN/codex" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' autodetect-smoke-ok
+SH
+chmod +x "$FAKE_BIN/codex"
 # Backend auto-detection is what is under test here, so opt out of the default-on
 # presentation projection and keep the assertions on the flat per-home workspace.
 printf 'off\n' > "$CONFIG/herdr-presentation-spaces"
-printf 'trivial autodetect-smoke brief: nothing to do.\n' > "$DATA/$ID/brief.md"
+cat > "$DATA/$ID/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Herdr backend auto-detection.
+
+## Firstmate spec
+Verify the real spawn path selects Herdr.
+EOF
 
 PROJ="$TMP_ROOT/scratch-project"
 mkdir -p "$PROJ"
@@ -104,11 +117,11 @@ git -C "$PROJ" remote add origin "file://$PROJ.origin.git"
 # --- spawn with NO explicit backend config; HERDR_ENV=1 is the only marker --
 
 OUT_FILE="$TMP_ROOT/spawn.out"; ERR_FILE="$TMP_ROOT/spawn.err"
-env -u TMUX -u FM_BACKEND PATH="$PATH" HERDR_ENV=1 \
+env -u TMUX -u FM_BACKEND PATH="$FAKE_BIN:$PATH" HERDR_ENV=1 \
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
   FM_CONFIG_OVERRIDE="$CONFIG" FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" \
   FM_SPAWN_NO_GUARD=1 \
-  "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" "sh -c 'echo autodetect-smoke-ok'" --mode no-mistakes --yolo off \
+  "$ROOT/bin/fm-spawn.sh" "$ID" "$PROJ" --harness codex --mode no-mistakes --yolo off \
   >"$OUT_FILE" 2>"$ERR_FILE"
 status=$?
 [ "$status" -eq 0 ] || fail "fm-spawn.sh did not succeed auto-detecting herdr"$'\n'"--- stdout ---"$'\n'"$(cat "$OUT_FILE")"$'\n'"--- stderr ---"$'\n'"$(cat "$ERR_FILE")"
@@ -149,9 +162,9 @@ CAPTURED=$("$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" --sour
 CAPTURED=$(printf '%s\n' "$CAPTURED" | tail -n 30)
 case "$CAPTURED" in
   *autodetect-smoke-ok*) : ;;
-  *) fail "the raw launch command did not run in the auto-detected herdr pane"$'\n'"$CAPTURED" ;;
+  *) fail "the named codex adapter did not run in the auto-detected herdr pane"$'\n'"$CAPTURED" ;;
 esac
-pass "real herdr: the auto-detected spawn's launch command actually ran in the herdr pane"
+pass "real herdr: the auto-detected spawn's named adapter actually ran in the herdr pane"
 
 # --- teardown completes the trivial spawn/teardown cycle --------------------
 
