@@ -251,8 +251,31 @@ const expectedArgv = [
   "-e", "/state/task.omp-ext.ts",
 ];
 if (JSON.stringify(manifest.unsetEnvironment) !== JSON.stringify(expectedUnset)) process.exit(1);
-if (manifest.environment.FM_OMP_HARNESS !== "1") process.exit(1);
-if (manifest.environment.PI_CODING_AGENT_DIR !== "/isolated/agent") process.exit(1);
+const expectedEnvironment = {
+  FM_OMP_HARNESS: "1",
+  HOME: "/isolated/agent/home",
+  PI_CODING_AGENT_DIR: "/isolated/agent",
+  PI_CONFIG_DIR: ".omp",
+  XDG_CONFIG_HOME: "/isolated/agent/xdg/config",
+  XDG_DATA_HOME: "/isolated/agent/xdg/data",
+  XDG_STATE_HOME: "/isolated/agent/xdg/state",
+  XDG_CACHE_HOME: "/isolated/agent/xdg/cache",
+  TMPDIR: "/isolated/agent/tmp",
+  OMP_WORKTREE_DIR: "/isolated/agent/worktrees",
+  CLAUDE_CONFIG_DIR: "/isolated/agent/home/.claude",
+  COPILOT_HOME: "/isolated/agent/home/.copilot",
+  GH_CONFIG_DIR: "/isolated/agent/home/.config/gh",
+  AWS_CONFIG_FILE: "/isolated/agent/home/.aws/config",
+  AWS_SHARED_CREDENTIALS_FILE: "/isolated/agent/home/.aws/credentials",
+  CHROME_CONFIG_HOME: "/isolated/agent/home/.config/chrome",
+  BUN_INSTALL: "/isolated/agent/home/.bun",
+  GIT_CONFIG_GLOBAL: "/isolated/agent/home/.gitconfig",
+  GIT_CONFIG_NOSYSTEM: "1",
+  PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+  SHELL: "/bin/zsh",
+  TERM: "xterm-256color",
+};
+if (JSON.stringify(manifest.environment) !== JSON.stringify(expectedEnvironment)) process.exit(1);
 if (JSON.stringify(manifest.argv) !== JSON.stringify(expectedArgv)) process.exit(1);
 if (manifest.argv.includes("--tools")) process.exit(1);
 if (!manifest.argv.includes("--no-tools")) process.exit(1);
@@ -260,7 +283,10 @@ if (manifest.argv.includes("--add-dir")) process.exit(1);
 if (manifest.argv.includes("/task/worktree")) process.exit(1);
 const templateManifest = {
   ...manifest,
-  environment: { FM_OMP_HARNESS: "1", PI_CODING_AGENT_DIR: "__OMPAGENTDIR__" },
+  environment: Object.fromEntries(Object.entries(manifest.environment).map(([name, value]) => [
+    name,
+    typeof value === "string" ? value.replaceAll("/isolated/agent", "__OMPAGENTDIR__") : value,
+  ])),
   argv: manifest.argv.map((word) => ({
     "/opt/omp": "__OMPBIN__",
     "/isolated/cwd": "__OMPCWD__",
@@ -268,7 +294,7 @@ const templateManifest = {
     "/state/task.omp-ext.ts": "__OMPEXT__",
   })[word] || word),
 };
-const words = ["env"];
+const words = ["env", "-i"];
 for (const name of templateManifest.unsetEnvironment) words.push("-u", name);
 for (const [name, value] of Object.entries(templateManifest.environment)) words.push(`${name}=${value}`);
 words.push(...templateManifest.argv);
@@ -278,6 +304,46 @@ NODE
   pass "OMP candidate renderer emits its requested argv and environment contract"
 }
 
+test_omp_boundary_precondition_rejects_incomplete_config_roots() {
+  local lab agent_dir cwd operator_home manifest_file negative_file out status
+  lab="$TMP_ROOT/boundary-precondition"
+  agent_dir="$lab/isolated-agent"
+  cwd="$lab/isolated-cwd"
+  operator_home="$TMP_ROOT/operator-home"
+  manifest_file="$lab/manifest.json"
+  negative_file="$lab/manifest-negative.json"
+  mkdir -p "$lab" "$operator_home"
+  "$ROOT/bin/fm-omp-candidate-artifacts.sh" prepare "$agent_dir" "$cwd" \
+    || fail "could not prepare the boundary fixture"
+  "$ROOT/bin/fm-omp-candidate-artifacts.sh" manifest \
+    "$agent_dir" "$cwd" /opt/omp "$OMP_MODEL" "$lab/task.omp-ext.ts" \
+    > "$manifest_file" || fail "could not render the boundary fixture manifest"
+
+  out=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" verify-boundary \
+    "$manifest_file" "$lab" "$operator_home" 2>&1) \
+    || fail "the complete containment boundary was refused: $out"
+  assert_contains "$out" "boundary-ok" \
+    "the complete containment boundary did not report its positive verdict"
+
+  MANIFEST_PATH="$manifest_file" NEGATIVE_PATH="$negative_file" \
+    OPERATOR_HOME="$operator_home" node <<'NODE' \
+    || fail "could not construct the intentionally incomplete boundary"
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_PATH, "utf8"));
+manifest.environment.HOME = process.env.OPERATOR_HOME;
+fs.writeFileSync(process.env.NEGATIVE_PATH, JSON.stringify(manifest));
+NODE
+  if out=$("$ROOT/bin/fm-omp-candidate-artifacts.sh" verify-boundary \
+    "$negative_file" "$lab" "$operator_home" 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "the intentionally incomplete HOME boundary was accepted"
+  assert_contains "$out" "HOME" \
+    "the boundary refusal did not identify the incomplete HOME root"
+  pass "OMP boundary precondition accepts the lab and rejects an operator-HOME escape"
+}
 test_omp_consumer_proof_gate_never_executes_candidate() {
   local dir fakebin log out status
   dir="$TMP_ROOT/omp-consumer-proof"
@@ -1063,6 +1129,7 @@ test_omp_token_is_not_normalized_to_pi
 test_omp_is_unreachable_without_explicit_selection
 test_omp_dormancy_never_resolves_or_executes_candidate
 test_omp_launch_request_is_rendered
+test_omp_boundary_precondition_rejects_incomplete_config_roots
 test_omp_manifest_routes_agent_tools_away_from_captain_claude_tools
 test_omp_consumer_proof_gate_never_executes_candidate
 test_omp_candidate_artifacts_render_requested_settings_and_handle_continuation

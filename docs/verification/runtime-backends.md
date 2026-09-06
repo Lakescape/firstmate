@@ -1121,17 +1121,82 @@ A second regression holds a branch settlement open while the verified successor 
 
 The OMP adapter and manifest are review-only.
 The candidate contract and refusal gate are pinned to exact `omp/17.2.9`.
-`tests/fm-omp-harness.test.sh` proves that the adapter renders isolated settings, routes its rendered agent tool path to `/firstmate/isolated-agent/tools` instead of a present captain `~/.claude/tools` fixture, and requests the tool surface disabled with `--no-tools`.
-These are renderer and requested-settings proofs only.
-Effective configuration, fallback isolation, and effective tool construction remain explicitly unproven.
-No supported session-free consumer pinned to that exact artifact has been established.
+`tests/fm-omp-harness.test.sh` proves that the adapter renders isolated settings, launches through `env -i`, routes its rendered agent tool path to `/firstmate/isolated-agent/tools`, and redirects every declared compatibility configuration root under the isolated agent directory.
+The public `verify-boundary` seam resolves the nearest existing ancestor of every root and every known MCP compatibility source before launch, refusing symlink or path escapes and any alias to an operator-home source.
+The independent negative control changes only `HOME` to the operator home and must be refused by name.
 
 On 2026-09-03, an accidental ambient OMP run enumerated `~/.claude/tools` and attempted to load `agent-secrets-collect.py` and `rotate-pending-keys.sh` as tools.
 Both files failed format validation, but the attempted loads establish ambient tool inheritance as a measured hazard rather than a theoretical one.
+On 2026-09-05, a live credential-free run with `PI_CODING_AGENT_DIR` isolated but the real `HOME` retained loaded the operator's `~/.claude.json` and attempted ambient MCP connections despite `--no-tools` and `--no-extensions`.
+That result established that those flags are requests rather than an MCP containment boundary.
 
-Two measured findings bound which consumer surfaces remain worth attempting.
-On 2026-08-24, source review invalidated an earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it falls outside this candidate's no-session and no-network verification authority.
-The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove `omp/17.2.9` behavior.
+Readable strings in the provenance-matched v17.2.9 binary show that its native config root is `PI_CONFIG_DIR` under `os.homedir()`, its agent override is `PI_CODING_AGENT_DIR`, and its data, state, and cache roots can honor `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME`.
+The same readable bundle maps user compatibility discovery to `.claude`, `.codex`, `.gemini`, `.config/opencode`, `.cursor`, `.codeium/windsurf`, `.cline`, and `.vscode` under the discovery home.
+The Claude loader specifically composes `<home>/.claude.json` and `<home>/.claude/mcp.json`, while the Cursor loader composes `<home>/.cursor/mcp.json`.
+Those observations are why the launch boundary redirects `HOME`, `PI_CONFIG_DIR`, all four XDG roots, and the additional explicit config-file roots before OMP starts.
+
+The pre-launch-only proof ran on 2026-09-05 without starting OMP:
+
+```sh
+FM_OMP_LIFECYCLE_LIVE_E2E=1 FM_OMP_LIFECYCLE_PREFLIGHT_ONLY=1 \
+  tests/fm-omp-lifecycle-live-e2e.test.sh
+```
+
+```text
+ok - OMP lifecycle preflight: the resolved agent directory is scratch space outside the operator Claude directory
+# command: bin/fm-omp-candidate-artifacts.sh verify-boundary <manifest> <scratch-lab> <operator-home>
+# observed: boundary-ok roots=HOME,PI_CODING_AGENT_DIR,PI_CONFIG_DIR,XDG_CONFIG_HOME,XDG_DATA_HOME,XDG_STATE_HOME,XDG_CACHE_HOME,TMPDIR,OMP_WORKTREE_DIR,CLAUDE_CONFIG_DIR,COPILOT_HOME,GH_CONFIG_DIR,AWS_CONFIG_FILE,AWS_SHARED_CREDENTIALS_FILE,CHROME_CONFIG_HOME,BUN_INSTALL,GIT_CONFIG_GLOBAL sources=19
+ok - OMP lifecycle preflight: every effective compatibility configuration source resolves inside the lab
+# negative control: error: OMP launch boundary refused: HOME does not resolve to its isolated path
+ok - OMP lifecycle preflight: an incomplete HOME boundary is refused before launch
+all pre-launch OMP containment checks passed without launching OMP
+```
+
+Only after that proof passed, the full live command ran the provenance-matched v17.2.9 binary with process-scoped `OMP_SKIP_SETUP=1`, no provider credential, and a private tmux server:
+
+```sh
+FM_OMP_LIFECYCLE_LIVE_E2E=1 tests/fm-omp-lifecycle-live-e2e.test.sh
+```
+
+```text
+ok - OMP lifecycle preflight: the resolved agent directory is scratch space outside the operator Claude directory
+# command: bin/fm-omp-candidate-artifacts.sh verify-boundary <manifest> <scratch-lab> <operator-home>
+# observed: boundary-ok roots=HOME,PI_CODING_AGENT_DIR,PI_CONFIG_DIR,XDG_CONFIG_HOME,XDG_DATA_HOME,XDG_STATE_HOME,XDG_CACHE_HOME,TMPDIR,OMP_WORKTREE_DIR,CLAUDE_CONFIG_DIR,COPILOT_HOME,GH_CONFIG_DIR,AWS_CONFIG_FILE,AWS_SHARED_CREDENTIALS_FILE,CHROME_CONFIG_HOME,BUN_INSTALL,GIT_CONFIG_GLOBAL sources=19
+ok - OMP lifecycle preflight: every effective compatibility configuration source resolves inside the lab
+# negative control: error: OMP launch boundary refused: HOME does not resolve to its isolated path
+ok - OMP lifecycle preflight: an incomplete HOME boundary is refused before launch
+# launch environment: OMP_SKIP_SETUP=1 HOME=<scratch-agent-home> PI_CODING_AGENT_DIR=<scratch-agent-dir>
+# launch manifest: binary=<provenance-matched-omp/17.2.9> cwd=<scratch-cwd> model=anthropic/claude-sonnet-4-5 tools=disabled
+# running-process environment: isolated HOME, PI_CONFIG_DIR, PI_CODING_AGENT_DIR, and XDG roots verified; operator HOME absent
+# running-process open-file snapshot: no operator Claude, Cursor, Gemini, Codex, OpenCode, Windsurf, or VS Code configuration path
+# running-process MCP source/status lines: none
+# running-process network connections: 2 external TCP connection(s) observed; no evidence classified them as MCP
+ok - real OMP containment: zero MCP reach and no operator configuration access observed
+# command: FM_HOME=<scratch-home> bin/fm-control.sh omp-lifecycle-live interrupt
+# observed: interrupt-delivered omp-lifecycle-live harness=omp backend=tmux verified=agent-alive cancel=unconfirmed; the original pid remained alive in the same tmux endpoint
+# mechanism strength: the same single Escape and process-liveness postcondition apply to a provider-configured session, but this idle credential-free run does not prove mid-inference cancellation
+ok - partial OMP interrupt: delivery preserved the exact idle process; cancellation remained unconfirmed
+# command: FM_HOME=<scratch-home> bin/fm-control.sh omp-lifecycle-live exit
+# observed: stopped omp-lifecycle-live harness=omp backend=tmux endpoint=fm-omp-lifecycle:fm-omp-lifecycle-live worktree=<scratch-cwd>; the original pid was gone and the tmux endpoint remained
+# mechanism strength: the same /quit submission and dead-process classifier apply to a provider-configured idle session, but this credential-free run does not cover provider teardown while inference is active
+ok - partial OMP exit: /quit stopped the credential-free process and preserved the tmux endpoint
+# command: FM_HOME=<scratch-home> bin/fm-control.sh omp-lifecycle-live relaunch --harness omp --model anthropic/claude-sonnet-4-5 --note <probe-note>
+# observed: the prior pid stopped, no replacement OMP pid appeared, and fm-spawn retained the dormancy refusal
+# mechanism strength: the stop half used the same /quit and dead-process proof, but the mandatory dormancy gate prevented replacement, so relaunch remains partial for both credential-free and provider-configured sessions
+ok - partial OMP relaunch: prior process stopped; replacement was correctly refused by dormancy
+all live OMP lifecycle checks completed with explicitly partial interrupt, exit, and relaunch results
+```
+
+The running process showed no MCP source or status line and held no operator Claude, Cursor, Gemini, Codex, OpenCode, Windsurf, or VS Code configuration path at the open-file snapshot.
+Two external TLS sockets were present, and this evidence does not classify them as MCP or prove their purpose.
+The executable and operating-system runtime necessarily live outside the scratch lab, and the open-file snapshot is not a historical trace of every file read, so this result does not claim that OMP read no outside-lab file of any kind.
+It does prove by resolved configuration construction, actual process environment, rendered MCP status, and open operator-config paths that the operator configuration was outside OMP's effective compatibility roots and no ambient MCP reach was observed.
+
+On failure, the gate now writes a sanitized bundle under `.no-mistakes/omp-lifecycle-evidence/failure-*` before deleting the scratch lab.
+The bundle contains the complete constructed argv, manifest, pane transcript, MCP source and status lines, running-process environment, open-file snapshot, network connections, and failure reason without credential values.
+The failed readiness-regex run on 2026-09-05 exercised that path and retained all eight expected files, closing `fm-omp-lifecycle-test-evidence-retention` against this work.
+Both success and failure cleanup kill the private tmux server, unlink its exact socket node, and fail if that node remains.
+The previously observed `.fm-omp-96394`, `.fm-omp-75228`, and `.fm-omp-47520` nodes were absent from this isolated worktree at final verification, and no `.fm-omp-*` socket remained after any completed run.
 
 The opt-in proof gate fails closed without resolving or executing any OMP candidate:
 
@@ -1143,13 +1208,14 @@ FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh
 not ok - requested omp/17.2.9 has no supported session-free configuration and tool consumer; executable provenance, version, and effective behavior remain unproven; candidate remains dormant without resolving or executing OMP
 ```
 
-The requested release metadata does not establish immutable executable provenance, installed version, or any effective consumer behavior.
+The lifecycle guard now establishes immutable executable provenance by matching the installed binary's SHA-256 to its adjacent v17.2.9 provenance record before launch.
+It does not establish a supported session-free consumer, effective built-in-tool removal, mid-inference cancellation, provider teardown, or a successful replacement launch.
 OMP remains hard dormant and non-runnable.
 The tmux-only development exception does not lift dormancy or establish any missing proof.
 Before dormancy can be reconsidered, all three independent mandatory prerequisites must pass:
 
-1. Immutable executable provenance and exact `omp/17.2.9` version binding.
-2. Supported session-free consumer proof pinned to that same exact artifact, covering effective configuration, fallback isolation, and effective tool construction.
-3. Separately gated ATX-2170 First Mate interrupt, exit, and relaunch verification.
+1. Preserve the now-passing immutable executable provenance and exact `omp/17.2.9` binding.
+2. Establish a supported session-free consumer pinned to that same exact artifact, including effective built-in-tool removal rather than only the now-proven ambient configuration and MCP boundary.
+3. Complete provider-configured mid-inference interrupt, provider teardown, and successful replacement relaunch verification rather than treating the partial lifecycle results above as sufficient.
 
 No prerequisite substitutes for another.
