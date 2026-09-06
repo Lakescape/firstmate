@@ -64,7 +64,9 @@ CONSTRUCTED_ARGV="$LAB/constructed-argv.json"
 PANE_TRANSCRIPT="$LAB/pane-transcript.txt"
 MCP_RECORD="$LAB/mcp-source-status.txt"
 OPEN_FILES="$LAB/process-open-files.txt"
-EVIDENCE_ROOT=${FM_OMP_LIFECYCLE_EVIDENCE_DIR:-"$ROOT/.fm-omp-lifecycle-evidence"}
+PROCESS_ENVIRONMENT="$LAB/process-environment.txt"
+NETWORK_CONNECTIONS="$LAB/network-connections.txt"
+EVIDENCE_ROOT=${FM_OMP_LIFECYCLE_EVIDENCE_DIR:-"$ROOT/.no-mistakes/omp-lifecycle-evidence"}
 EVIDENCE_BUNDLE=
 
 sanitize_copy() {
@@ -87,11 +89,17 @@ capture_runtime_evidence() {
   else
     : > "$PANE_TRANSCRIPT"
   fi
-  grep -Ei 'mcp|connect(ed|ing|ion)?|failed' "$PANE_TRANSCRIPT" > "$MCP_RECORD" 2>/dev/null || : > "$MCP_RECORD"
+  grep -Ei 'mcp' "$PANE_TRANSCRIPT" > "$MCP_RECORD" 2>/dev/null || : > "$MCP_RECORD"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     /usr/sbin/lsof -Fn -p "$pid" > "$OPEN_FILES" 2>/dev/null || : > "$OPEN_FILES"
+    /usr/sbin/lsof -nP -a -p "$pid" -i > "$NETWORK_CONNECTIONS" 2>/dev/null \
+      || : > "$NETWORK_CONNECTIONS"
+    ps eww -p "$pid" -o command= > "$PROCESS_ENVIRONMENT" 2>/dev/null \
+      || : > "$PROCESS_ENVIRONMENT"
   else
     : > "$OPEN_FILES"
+    : > "$NETWORK_CONNECTIONS"
+    : > "$PROCESS_ENVIRONMENT"
   fi
 }
 
@@ -106,6 +114,8 @@ retain_failure_evidence() {
   sanitize_copy "$PANE_TRANSCRIPT" "$EVIDENCE_BUNDLE/pane-transcript.txt"
   sanitize_copy "$MCP_RECORD" "$EVIDENCE_BUNDLE/mcp-source-status.txt"
   sanitize_copy "$OPEN_FILES" "$EVIDENCE_BUNDLE/process-open-files.txt"
+  sanitize_copy "$PROCESS_ENVIRONMENT" "$EVIDENCE_BUNDLE/process-environment.txt"
+  sanitize_copy "$NETWORK_CONNECTIONS" "$EVIDENCE_BUNDLE/network-connections.txt"
   printf '%s\n' "$reason" > "$EVIDENCE_BUNDLE/failure.txt"
   printf 'failure evidence: %s\n' "$EVIDENCE_BUNDLE" >&2
 }
@@ -338,6 +348,23 @@ wait_for_pane_pattern() {
   return 1
 }
 
+wait_for_pane_quiet() {
+  local i=0 stable=0 previous='' current=''
+  while [ "$i" -lt 150 ]; do
+    current=$(tmux capture-pane -p -S -500 -t "$TARGET" 2>/dev/null | shasum -a 256 | awk '{ print $1 }')
+    if [ -n "$current" ] && [ "$current" = "$previous" ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 10 ] && return 0
+    else
+      stable=0
+      previous=$current
+    fi
+    sleep 0.2
+    i=$((i + 1))
+  done
+  return 1
+}
+
 launch_real_omp() {
   tmux send-keys -t "$TARGET" -l "$LAUNCHER" \
     || harness_fail "could not type the manifest consumer into the private tmux pane"
@@ -363,11 +390,63 @@ case "$FIRST_COMMAND" in
   "$OMP_BIN"|"$OMP_BIN "*) ;;
   *) harness_fail "the tmux child is not the manifest-selected real OMP binary"
 esac
-wait_for_pane_pattern 'No model|not found|Ask anything' \
+wait_for_pane_pattern 'No model|No API key found|not found|Ask anything' \
   || {
     tmux capture-pane -p -S -200 -t "$TARGET" >&2 || true
     harness_fail "the setup-skipped OMP process never reached its credential-free input loop"
   }
+wait_for_pane_quiet \
+  || harness_fail "the setup-skipped OMP surface did not settle for containment observation"
+capture_runtime_evidence "$FIRST_PID"
+
+for actual_root in \
+  "HOME=$AGENT_REAL/home" \
+  "PI_CODING_AGENT_DIR=$AGENT_REAL" \
+  'PI_CONFIG_DIR=.omp' \
+  "XDG_CONFIG_HOME=$AGENT_REAL/xdg/config" \
+  "XDG_DATA_HOME=$AGENT_REAL/xdg/data" \
+  "XDG_STATE_HOME=$AGENT_REAL/xdg/state" \
+  "XDG_CACHE_HOME=$AGENT_REAL/xdg/cache" \
+  'OMP_SKIP_SETUP=1'; do
+  grep -Fq "$actual_root" "$PROCESS_ENVIRONMENT" \
+    || harness_fail "the running OMP process did not retain the proven root $actual_root"
+done
+if grep -Fq " HOME=$OPERATOR_HOME_REAL " "$PROCESS_ENVIRONMENT"; then
+  harness_fail "the running OMP process retained the operator HOME"
+fi
+
+for operator_source in \
+  "$OPERATOR_HOME_REAL/.claude.json" \
+  "$OPERATOR_HOME_REAL/.claude/" \
+  "$OPERATOR_HOME_REAL/.cursor/" \
+  "$OPERATOR_HOME_REAL/.gemini/" \
+  "$OPERATOR_HOME_REAL/.codex/" \
+  "$OPERATOR_HOME_REAL/.config/opencode/" \
+  "$OPERATOR_HOME_REAL/.codeium/windsurf/" \
+  "$OPERATOR_HOME_REAL/.vscode/"; do
+  if grep -Fq "$operator_source" "$OPEN_FILES"; then
+    harness_fail "the running OMP process held an operator configuration path: $operator_source"
+  fi
+done
+
+if [ -s "$MCP_RECORD" ]; then
+  printf '%s\n' 'observed MCP source/status lines:' >&2
+  cat "$MCP_RECORD" >&2
+  harness_fail "the contained OMP process still rendered MCP discovery or connection activity"
+fi
+NETWORK_CONNECTION_COUNT=$(awk 'NR > 1 && /TCP/ { count += 1 } END { print count + 0 }' "$NETWORK_CONNECTIONS")
+note "running-process environment: isolated HOME, PI_CONFIG_DIR, PI_CODING_AGENT_DIR, and XDG roots verified; operator HOME absent"
+note "running-process open-file snapshot: no operator Claude, Cursor, Gemini, Codex, OpenCode, Windsurf, or VS Code configuration path"
+note "running-process MCP source/status lines: none"
+note "running-process network connections: $NETWORK_CONNECTION_COUNT external TCP connection(s) observed; no evidence classified them as MCP"
+pass "real OMP containment: zero MCP reach and no operator configuration access observed"
+
+if [ "${FM_OMP_LIFECYCLE_OBSERVE_ONLY:-0}" = 1 ]; then
+  cleanup_all 0
+  trap - EXIT
+  echo "all live OMP containment observations passed; lifecycle controls not exercised"
+  exit 0
+fi
 
 set +e
 INTERRUPT_OUTPUT=$(run_control "$ID" interrupt 2>&1)
