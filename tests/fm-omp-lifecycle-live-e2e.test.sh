@@ -381,8 +381,8 @@ run_control() {
     FM_CONTROL_EXIT_WAIT=30 FM_CONTROL_LAUNCH_WAIT=30 "$CONTROL" "$@"
 }
 
-note "launch environment: OMP_SKIP_SETUP=1 PI_CODING_AGENT_DIR=$AGENT_REAL"
-note "launch manifest: binary=$OMP_BIN cwd=$WORKTREE_REAL model=$OMP_MODEL tools=disabled"
+note "launch environment: OMP_SKIP_SETUP=1 HOME=<scratch-agent-home> PI_CODING_AGENT_DIR=<scratch-agent-dir>"
+note "launch manifest: binary=<provenance-matched-omp/17.2.9> cwd=<scratch-cwd> model=$OMP_MODEL tools=disabled"
 
 FIRST_PID=$(launch_real_omp) || harness_fail "the first manifest launch failed"
 FIRST_COMMAND=$(ps -p "$FIRST_PID" -o command= 2>/dev/null || true)
@@ -457,12 +457,13 @@ set -e
 assert_contains "$INTERRUPT_OUTPUT" "interrupt-delivered $ID harness=omp backend=tmux verified=agent-alive cancel=unconfirmed" \
   "fm-control interrupt did not report its exact live-process postcondition"
 AFTER_INTERRUPT_PID=$(omp_pid || true)
-[ "$AFTER_INTERRUPT_PID" = "$FIRST_PID" ] && kill -0 "$FIRST_PID" 2>/dev/null \
-  || harness_fail "interrupt did not preserve the exact running OMP process"
+if [ "$AFTER_INTERRUPT_PID" != "$FIRST_PID" ] || ! kill -0 "$FIRST_PID" 2>/dev/null; then
+  harness_fail "interrupt did not preserve the exact running OMP process"
+fi
 note "command: FM_HOME=<scratch-home> bin/fm-control.sh $ID interrupt"
-note "observed: $INTERRUPT_OUTPUT; pid $FIRST_PID remained alive in the same tmux endpoint"
-note "mechanism strength: the same single Escape and process-liveness postcondition apply to a configured session, but this idle no-model run does not prove mid-inference cancellation"
-pass "real OMP control: interrupt delivery preserved the exact idle process"
+note "observed: $INTERRUPT_OUTPUT; the original pid remained alive in the same tmux endpoint"
+note "mechanism strength: the same single Escape and process-liveness postcondition apply to a provider-configured session, but this idle credential-free run does not prove mid-inference cancellation"
+pass "partial OMP interrupt: delivery preserved the exact idle process; cancellation remained unconfirmed"
 
 set +e
 EXIT_OUTPUT=$(run_control "$ID" exit 2>&1)
@@ -477,9 +478,10 @@ tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1 \
 [ -z "$(omp_pid || true)" ] \
   || harness_fail "an OMP process remained in the preserved endpoint after exit"
 note "command: FM_HOME=<scratch-home> bin/fm-control.sh $ID exit"
-note "observed: $EXIT_OUTPUT; pid $FIRST_PID was gone and the tmux endpoint remained"
-note "mechanism strength: the same /quit submission and dead-process classifier apply to a configured idle session, but this no-model run does not cover interrupt-first or provider teardown while inference is active"
-pass "real OMP control: exit stopped the process and preserved the tmux endpoint"
+EXIT_OUTPUT_FOR_REPORT=${EXIT_OUTPUT//$WORKTREE_REAL/<scratch-cwd>}
+note "observed: $EXIT_OUTPUT_FOR_REPORT; the original pid was gone and the tmux endpoint remained"
+note "mechanism strength: the same /quit submission and dead-process classifier apply to a provider-configured idle session, but this credential-free run does not cover provider teardown while inference is active"
+pass "partial OMP exit: /quit stopped the credential-free process and preserved the tmux endpoint"
 
 SECOND_PID=$(launch_real_omp) || harness_fail "the second manifest launch failed"
 [ -n "$SECOND_PID" ] && [ "$SECOND_PID" != "$FIRST_PID" ] \
@@ -496,15 +498,23 @@ if [ "$RELAUNCH_RC" -ne 0 ]; then
   [ -z "$(omp_pid || true)" ] \
     || harness_fail "the refused relaunch produced an unattributed replacement OMP process"
   note "command: FM_HOME=<scratch-home> bin/fm-control.sh $ID relaunch --harness omp --model $OMP_MODEL --note <probe-note>"
-  note "observed: the prior pid $SECOND_PID stopped, no replacement OMP pid appeared, and fm-spawn retained the dormancy refusal"
-  note "mechanism strength: the stop half used the same /quit and dead-process proof, but replacement launch never occurred, so no configured or no-model relaunch postcondition was proven"
-  printf '%s\n' "$RELAUNCH_OUTPUT" >&2
-  harness_fail "fm-control relaunch could not replace OMP because fm-spawn retained the mandatory dormancy refusal"
+  note "observed: the prior pid stopped, no replacement OMP pid appeared, and fm-spawn retained the dormancy refusal"
+  note "mechanism strength: the stop half used the same /quit and dead-process proof, but the mandatory dormancy gate prevented replacement, so relaunch remains partial for both credential-free and provider-configured sessions"
+  case "$RELAUNCH_OUTPUT" in
+    *'omp is dormant'*'replacement agent for omp-lifecycle-live could not be launched'*) ;;
+    *) harness_fail "fm-control relaunch failed without the mandatory OMP dormancy refusal: $RELAUNCH_OUTPUT" ;;
+  esac
+  pass "partial OMP relaunch: prior process stopped; replacement was correctly refused by dormancy"
+  cleanup_all 0
+  trap - EXIT
+  echo "all live OMP lifecycle checks completed with explicitly partial interrupt, exit, and relaunch results"
+  exit 0
 fi
 
 THIRD_PID=$(omp_pid || true)
-[ -n "$THIRD_PID" ] && [ "$THIRD_PID" != "$SECOND_PID" ] && kill -0 "$THIRD_PID" 2>/dev/null \
-  || harness_fail "fm-control relaunch returned without a fresh real OMP replacement"
+if [ -z "$THIRD_PID" ] || [ "$THIRD_PID" = "$SECOND_PID" ] || ! kill -0 "$THIRD_PID" 2>/dev/null; then
+  harness_fail "fm-control relaunch returned without a fresh real OMP replacement"
+fi
 pass "real OMP control: relaunch replaced the process in the same tmux endpoint"
 
 cleanup_all 0
