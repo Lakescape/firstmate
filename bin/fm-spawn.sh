@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -105,9 +105,12 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   overrides it for this spawn (either kind). Only named adapters are supported.
+#   A non-flag string containing whitespace is an opaque raw launch command and is
+#   refused before mutation because aliases, renamed binaries, and wrapper scripts
+#   cannot be bound to a verified adapter identity. New adapters must first receive
+#   a named, owned launch template. For pi and pi-signed, fm-spawn resolves the
+#   selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -117,7 +120,7 @@
 #   whitespace-separated tokens ("<harness> [<model>] [<effort>]"). For a
 #   --secondmate spawn, those tokens apply only when this spawn also resolves its
 #   harness from config/secondmate-harness. An explicit per-spawn --harness,
-#   positional harness arg, or raw launch command starts with clean model/effort
+#   positional harness arg starts with clean model/effort
 #   defaults unless the caller also passes explicit --model/--effort flags. When
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
@@ -319,9 +322,6 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -484,13 +484,28 @@ require_omp_tmux_backend() {
   fi
 }
 
-# Raw launch text is never executed to classify this candidate.
-# Any whitespace-delimited word whose basename is the candidate command claims
-# the OMP identity and must use the named adapter path instead.
-raw_launch_selects_omp() {
+# Classify whether a refused raw launch has one simple literal argv shape.
+spawn_raw_launch_shape_valid() {
   local raw=$1
-  local pattern='(^|[[:space:];|&()])([^[:space:];|&()]*/)?omp([[:space:];|&()]|$)'
-  [[ $raw =~ $pattern ]]
+  local safe_shape='^[A-Za-z0-9_./:@%+=,-]+( [A-Za-z0-9_./:@%+=,-]+)*$'
+  [[ $raw =~ $safe_shape ]] || return 1
+  case " $raw " in
+    *' -S'*|*' --split-string'*) return 1 ;;
+  esac
+}
+
+spawn_refuse_opaque_raw_launch() {
+  local raw=$1
+  case "$raw" in
+    *[[:space:]]*)
+      if ! spawn_raw_launch_shape_valid "$raw"; then
+        echo "error: raw launch command must be one literal command with space-delimited words; shell quoting, expansion, redirection, globbing, compound expressions, and nested argument parsing are refused" >&2
+        exit 1
+      fi
+      echo "error: opaque raw launch commands are disabled because their execution identity cannot be verified; select a named adapter with --harness" >&2
+      exit 1
+      ;;
+  esac
 }
 
 spawn_remote_secondmate() {
@@ -993,6 +1008,71 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   echo "error: --relaunch is single-task only; relaunch each task explicitly" >&2
   exit 1
 fi
+
+# Resolve only the caller-supplied fresh selection shape here, before any
+# backend contact, lifecycle lock, or state mutation. A relaunch without an
+# explicit override must first bind its recorded harness under the task locks.
+SPAWN_PREFLIGHT_ARG3=
+if [ "$RELAUNCH" -eq 0 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" = "$idpart" ]; then
+  if [ "$KIND" = secondmate ]; then
+    case "${POS[1]:-}" in
+      ''|claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse|omp)
+        SPAWN_PREFLIGHT_ARG3=${POS[1]:-}
+        ;;
+      *' '*)
+        if [ "${#POS[@]}" -gt 2 ] || [ -d "${POS[1]}" ]; then
+          SPAWN_PREFLIGHT_ARG3=${POS[2]:-}
+        else
+          SPAWN_PREFLIGHT_ARG3=${POS[1]}
+        fi
+        ;;
+      *)
+        SPAWN_PREFLIGHT_ARG3=${POS[2]:-}
+        ;;
+    esac
+  else
+    SPAWN_PREFLIGHT_ARG3=${POS[2]:-}
+  fi
+fi
+[ -z "$HARNESS_ARG" ] || SPAWN_PREFLIGHT_ARG3=$HARNESS_ARG
+spawn_refuse_opaque_raw_launch "$SPAWN_PREFLIGHT_ARG3"
+
+# A caller-explicit fresh OMP selection is completely classifiable before any
+# backend validation, watcher guard, or task lock. Positional and configured
+# OMP selections are also categorically refused before those mutation points.
+if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS_ARG" = omp ]; then
+  if [ "$KIND" = secondmate ]; then
+    refuse_omp_secondmate
+    exit 1
+  fi
+  require_omp_launch_model || exit 1
+  if [ "$BACKEND_SET" -eq 1 ]; then
+    BACKEND=$BACKEND_ARG
+  else
+    BACKEND=$(fm_backend_name)
+  fi
+  require_omp_tmux_backend || exit 1
+  refuse_omp_unverified_gates || exit 1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ -z "$HARNESS_ARG" ] && [ "$SPAWN_PREFLIGHT_ARG3" = omp ]; then
+  echo "error: every omp spawn and relaunch requires an explicit --harness omp selection; raw, positional, configured, and recorded omp selections are not allowed" >&2
+  exit 1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ -z "$HARNESS_ARG" ] && [ -z "$SPAWN_PREFLIGHT_ARG3" ] \
+   && [ "$KIND" != secondmate ] && [ ! -f "$CONFIG/crew-dispatch.json" ] \
+   && [ "$("$FM_ROOT/bin/fm-harness.sh" crew)" = omp ]; then
+  echo "error: every omp spawn and relaunch requires an explicit --harness omp selection; raw, positional, configured, and recorded omp selections are not allowed" >&2
+  exit 1
+fi
+
+# Skip the watcher guard when re-exec'd for one pair of a batch
+# (FM_SPAWN_NO_GUARD is set by the batch loop below), so the guard runs once
+# for the batch, not once per pair. Relaunch runs it only after lifecycle
+# serialization below.
+if [ "$RELAUNCH" -eq 0 ]; then
+  [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+fi
+
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
@@ -1037,23 +1117,6 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
-# A caller-explicit fresh OMP selection is completely classifiable before any
-# backend validation or task lock, so an Orca request names the tmux exception
-# instead of contacting the rejected backend.
-if [ "$RELAUNCH" -eq 0 ] && [ "$HARNESS_ARG" = omp ]; then
-  if [ "$KIND" = secondmate ]; then
-    refuse_omp_secondmate
-    exit 1
-  fi
-  require_omp_launch_model || exit 1
-  if [ "$BACKEND_SET" -eq 1 ]; then
-    BACKEND=$BACKEND_ARG
-  else
-    BACKEND=$(fm_backend_name)
-  fi
-  require_omp_tmux_backend || exit 1
-  refuse_omp_unverified_gates || exit 1
-fi
 # Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
@@ -1080,6 +1143,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: another lifecycle action is already running for task $ID" >&2
     exit 1
   fi
+  [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 fi
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
@@ -1379,16 +1443,8 @@ launch_template() {
 }
 
 case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
-    if raw_launch_selects_omp "$ARG3"; then
-      echo "error: every omp spawn and relaunch requires an explicit --harness omp selection; raw, positional, configured, and recorded omp selections are not allowed" >&2
-      exit 1
-    fi
-    LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
+  *[[:space:]]*)
+    spawn_refuse_opaque_raw_launch "$ARG3"
     ;;
   '')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -1410,11 +1466,11 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); select a verified named adapter with --harness" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; select a verified named adapter with --harness" >&2; exit 1; }
     ;;
 esac
 
