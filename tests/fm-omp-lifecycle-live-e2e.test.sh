@@ -4,8 +4,10 @@
 # The guard stages one real OMP process in a private tmux server through the
 # candidate manifest, then drives interrupt, exit, and relaunch only through
 # bin/fm-control.sh.
-# The manifest's agent directory is resolved and proven to be scratch space
-# outside the operator's Claude directory before the first process starts.
+# The manifest's complete configuration environment is resolved and proven to
+# stay inside scratch space before the first process starts.
+# Set FM_OMP_LIFECYCLE_PREFLIGHT_ONLY=1 to exercise that proof and its deliberate
+# negative control without launching OMP.
 # Standard CI does not run installed harnesses, so this guard is opt-in.
 set -u
 
@@ -21,6 +23,21 @@ OMP_MODEL=anthropic/claude-sonnet-4-5
 OMP_BIN=$(command -v omp 2>/dev/null || true)
 [ -n "$OMP_BIN" ] && [ -x "$OMP_BIN" ] \
   || fail "omp not found; this gate refuses to pass without the real candidate"
+OMP_BIN_REAL=$(realpath "$OMP_BIN" 2>/dev/null || true)
+[ -n "$OMP_BIN_REAL" ] && [ -x "$OMP_BIN_REAL" ] \
+  || fail "the resolved OMP candidate is not executable"
+OMP_PROVENANCE=$(dirname "$OMP_BIN_REAL")/PROVENANCE.json
+[ -r "$OMP_PROVENANCE" ] \
+  || fail "the resolved OMP candidate has no readable provenance record"
+EXPECTED_OMP_SHA=$(PROVENANCE="$OMP_PROVENANCE" node -e '
+const p = require(process.env.PROVENANCE);
+if (p.release !== "v17.2.9" || p.reportedVersion !== "omp/17.2.9") process.exit(1);
+process.stdout.write(p.sha256);
+' 2>/dev/null) || fail "the OMP provenance record is not pinned to v17.2.9"
+ACTUAL_OMP_SHA=$(shasum -a 256 "$OMP_BIN_REAL" | awk '{ print $1 }') \
+  || fail "the OMP candidate digest could not be calculated"
+[ "$ACTUAL_OMP_SHA" = "$EXPECTED_OMP_SHA" ] \
+  || fail "the OMP candidate digest does not match its v17.2.9 provenance"
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
 [ -n "$REAL_TMUX" ] && [ -x "$REAL_TMUX" ] \
   || fail "tmux not found; the OMP lifecycle gate requires the verified backend"
@@ -38,15 +55,100 @@ SESSION=fm-omp-lifecycle
 ID=omp-lifecycle-live
 TARGET="$SESSION:fm-$ID"
 MANIFEST="$LAB/manifest.json"
+NEGATIVE_MANIFEST="$LAB/manifest-negative.json"
 BRIEF="$DATA/$ID/brief.md"
 LAUNCHER="$LAB/launch-omp.sh"
 CONTROL="$ROOT/bin/fm-control.sh"
+BOUNDARY="$ROOT/bin/fm-omp-candidate-artifacts.sh"
+CONSTRUCTED_ARGV="$LAB/constructed-argv.json"
+PANE_TRANSCRIPT="$LAB/pane-transcript.txt"
+MCP_RECORD="$LAB/mcp-source-status.txt"
+OPEN_FILES="$LAB/process-open-files.txt"
+EVIDENCE_ROOT=${FM_OMP_LIFECYCLE_EVIDENCE_DIR:-"$ROOT/.fm-omp-lifecycle-evidence"}
+EVIDENCE_BUNDLE=
+
+sanitize_copy() {
+  local source=$1 destination=$2
+  SOURCE_PATH="$source" DESTINATION_PATH="$destination" node <<'NODE'
+const fs = require("node:fs");
+const source = process.env.SOURCE_PATH;
+let content = fs.existsSync(source) ? fs.readFileSync(source, "utf8") : "";
+content = content
+  .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret)\s*[:=]\s*)[^\s,'"}]+/gi, "$1<redacted>")
+  .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+/gi, "$1<redacted>");
+fs.writeFileSync(process.env.DESTINATION_PATH, content);
+NODE
+}
+
+capture_runtime_evidence() {
+  local pid=${1:-}
+  if tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null 2>&1; then
+    tmux capture-pane -p -S -500 -t "$TARGET" > "$PANE_TRANSCRIPT" 2>/dev/null || : > "$PANE_TRANSCRIPT"
+  else
+    : > "$PANE_TRANSCRIPT"
+  fi
+  grep -Ei 'mcp|connect(ed|ing|ion)?|failed' "$PANE_TRANSCRIPT" > "$MCP_RECORD" 2>/dev/null || : > "$MCP_RECORD"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    /usr/sbin/lsof -Fn -p "$pid" > "$OPEN_FILES" 2>/dev/null || : > "$OPEN_FILES"
+  else
+    : > "$OPEN_FILES"
+  fi
+}
+
+retain_failure_evidence() {
+  local reason=$1 stamp
+  [ -n "$EVIDENCE_BUNDLE" ] && return 0
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  EVIDENCE_BUNDLE="$EVIDENCE_ROOT/failure-$stamp-$$"
+  mkdir -p "$EVIDENCE_BUNDLE" || return 1
+  sanitize_copy "$MANIFEST" "$EVIDENCE_BUNDLE/manifest.json"
+  sanitize_copy "$CONSTRUCTED_ARGV" "$EVIDENCE_BUNDLE/constructed-argv.json"
+  sanitize_copy "$PANE_TRANSCRIPT" "$EVIDENCE_BUNDLE/pane-transcript.txt"
+  sanitize_copy "$MCP_RECORD" "$EVIDENCE_BUNDLE/mcp-source-status.txt"
+  sanitize_copy "$OPEN_FILES" "$EVIDENCE_BUNDLE/process-open-files.txt"
+  printf '%s\n' "$reason" > "$EVIDENCE_BUNDLE/failure.txt"
+  printf 'failure evidence: %s\n' "$EVIDENCE_BUNDLE" >&2
+}
 
 cleanup_all() {
+  local trapped_status=$? requested_status=${1:-} status live_pid='' cleanup_error=0
+  if [ -n "$requested_status" ]; then
+    status=$requested_status
+  else
+    status=$trapped_status
+  fi
+  live_pid=$(omp_pid 2>/dev/null || true)
+  capture_runtime_evidence "$live_pid"
+  if [ "$status" -ne 0 ]; then
+    retain_failure_evidence "test exited $status before cleanup" || true
+  fi
   if [ -n "${REAL_TMUX:-}" ] && [ -n "${SOCKET_PATH:-}" ]; then
     "$REAL_TMUX" -S "$SOCKET_PATH" kill-server >/dev/null 2>&1 || true
   fi
-  [ -n "${LAB:-}" ] && rm -rf "$LAB"
+  if [ -e "$SOCKET_PATH" ] || [ -L "$SOCKET_PATH" ]; then
+    unlink "$SOCKET_PATH" 2>/dev/null || cleanup_error=1
+  fi
+  if [ -e "$SOCKET_PATH" ] || [ -L "$SOCKET_PATH" ]; then
+    cleanup_error=1
+    printf 'error: stale private tmux socket remains: %s\n' "$SOCKET_PATH" >&2
+  fi
+  if [ "$cleanup_error" -ne 0 ]; then
+    retain_failure_evidence "private tmux socket cleanup failed" || true
+    status=1
+  fi
+  case "${LAB:-}" in
+    "$ROOT"/.fm-omp-lifecycle.*) rm -rf "$LAB" ;;
+    '') ;;
+    *)
+      printf 'error: refusing to remove unexpected OMP laboratory path: %s\n' "$LAB" >&2
+      status=1
+      ;;
+  esac
+  trap - EXIT
+  if [ -n "$requested_status" ]; then
+    return "$status"
+  fi
+  exit "$status"
 }
 trap cleanup_all EXIT
 
@@ -112,6 +214,46 @@ if (cwdIndex < 0 || manifest.argv[cwdIndex + 1] !== process.env.EXPECTED_CWD) pr
 if (!manifest.argv.includes("--no-tools")) process.exit(1);
 NODE
 
+BOUNDARY_OUTPUT=$("$BOUNDARY" verify-boundary "$MANIFEST" "$LAB_REAL" "$OPERATOR_HOME_REAL" 2>&1) \
+  || harness_fail "the launch environment failed its fail-closed configuration-root boundary: $BOUNDARY_OUTPUT"
+note "command: bin/fm-omp-candidate-artifacts.sh verify-boundary <manifest> <scratch-lab> <operator-home>"
+note "observed: $BOUNDARY_OUTPUT"
+pass "OMP lifecycle preflight: every effective compatibility configuration source resolves inside the lab"
+
+MANIFEST_PATH="$MANIFEST" NEGATIVE_PATH="$NEGATIVE_MANIFEST" \
+  OPERATOR_HOME="$OPERATOR_HOME_REAL" node <<'NODE' \
+  || harness_fail "could not construct the deliberate incomplete-boundary control"
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_PATH, "utf8"));
+manifest.environment.HOME = process.env.OPERATOR_HOME;
+fs.writeFileSync(process.env.NEGATIVE_PATH, JSON.stringify(manifest));
+NODE
+if NEGATIVE_OUTPUT=$("$BOUNDARY" verify-boundary \
+  "$NEGATIVE_MANIFEST" "$LAB_REAL" "$OPERATOR_HOME_REAL" 2>&1); then
+  harness_fail "the deliberate incomplete HOME boundary was accepted: $NEGATIVE_OUTPUT"
+fi
+case "$NEGATIVE_OUTPUT" in
+  *HOME*) ;;
+  *) harness_fail "the deliberate boundary refusal did not identify HOME: $NEGATIVE_OUTPUT" ;;
+esac
+note "negative control: $NEGATIVE_OUTPUT"
+pass "OMP lifecycle preflight: an incomplete HOME boundary is refused before launch"
+
+FM_OMP_INPUT=$("$ROOT/bin/fm-operational-input.sh" encode launch-brief < "$BRIEF") \
+  MANIFEST_PATH="$MANIFEST" OUTPUT_PATH="$CONSTRUCTED_ARGV" node <<'NODE' \
+  || harness_fail "could not record the constructed OMP argv"
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_PATH, "utf8"));
+fs.writeFileSync(process.env.OUTPUT_PATH, JSON.stringify([...manifest.argv, process.env.FM_OMP_INPUT], null, 2) + "\n");
+NODE
+
+if [ "${FM_OMP_LIFECYCLE_PREFLIGHT_ONLY:-0}" = 1 ]; then
+  cleanup_all 0
+  trap - EXIT
+  echo "all pre-launch OMP containment checks passed without launching OMP"
+  exit 0
+fi
+
 cat > "$SHIM_DIR/tmux" <<'SH'
 #!/usr/bin/env bash
 exec "${FM_OMP_REAL_TMUX:?}" -S "${FM_OMP_TMUX_SOCKET:?}" "$@"
@@ -121,12 +263,8 @@ chmod +x "$SHIM_DIR/tmux"
 cat > "$LAUNCHER" <<'SH'
 #!/usr/bin/env bash
 set -eu
-unset_args=()
 environment=()
 argv=()
-while IFS= read -r name; do
-  unset_args+=("-u" "$name")
-done < <(node -e 'const m=require(process.argv[1]); for (const x of m.unsetEnvironment) console.log(x)' "$FM_OMP_MANIFEST")
 while IFS= read -r entry; do
   environment+=("$entry")
 done < <(node -e 'const m=require(process.argv[1]); for (const [k,v] of Object.entries(m.environment)) console.log(`${k}=${v}`)' "$FM_OMP_MANIFEST")
@@ -134,7 +272,7 @@ while IFS= read -r word; do
   argv+=("$word")
 done < <(node -e 'const m=require(process.argv[1]); for (const x of m.argv) console.log(x)' "$FM_OMP_MANIFEST")
 input=$("$FM_OMP_OPINPUT" encode launch-brief < "$FM_OMP_BRIEF")
-exec env "${unset_args[@]}" "${environment[@]}" OMP_SKIP_SETUP=1 "${argv[@]}" "$input"
+exec env -i "${environment[@]}" OMP_SKIP_SETUP=1 "${argv[@]}" "$input"
 SH
 chmod +x "$LAUNCHER"
 
@@ -290,6 +428,6 @@ THIRD_PID=$(omp_pid || true)
   || harness_fail "fm-control relaunch returned without a fresh real OMP replacement"
 pass "real OMP control: relaunch replaced the process in the same tmux endpoint"
 
-cleanup_all
+cleanup_all 0
 trap - EXIT
 echo "all live OMP lifecycle checks passed"
