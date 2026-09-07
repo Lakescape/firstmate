@@ -898,6 +898,7 @@ test_relaunch_lifecycle_lock_precedes_watcher_guard() {
     while [ ! -e "$release" ]; do /bin/sleep 0.01; done
     fm_lock_release "$lock"
   ) &
+  # shellcheck disable=SC2031  # $! is the background lock holder started immediately above
   holder=$!
   relaunch_wait_attempt=0
   while [ ! -e "$ready" ] && [ "$relaunch_wait_attempt" -lt 200 ]; do
