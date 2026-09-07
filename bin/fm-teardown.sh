@@ -2634,7 +2634,8 @@ preflight_descendant_treehouse_slots() {
     }
     held=0
     [ "$TREEHOUSE_PROJECT_LOCK_HELD" != 1 ] || [ "$TREEHOUSE_PROJECT_LOCK" != "$lock_path" ] || held=1
-    for target in "${DESCENDANT_TREEHOUSE_LOCK_PATHS[@]}"; do
+    # Bash 3.2 + set -u treats an expansion of an empty array as unbound.
+    for target in ${DESCENDANT_TREEHOUSE_LOCK_PATHS[@]+"${DESCENDANT_TREEHOUSE_LOCK_PATHS[@]}"}; do
       [ "$target" != "$lock_path" ] || held=1
     done
     if [ "$held" = 0 ]; then

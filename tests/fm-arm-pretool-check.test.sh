@@ -13,6 +13,10 @@ set -u
 
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
+# The hook classifies absolute x-mode setup paths against the active Firstmate
+# home. Pin that home to this checkout so a caller's unrelated FM_HOME cannot
+# make the acceptance matrix order- or harness-dependent.
+export FM_HOME="$ROOT"
 
 # --- full cross-harness acceptance matrix ----------------------------------
 

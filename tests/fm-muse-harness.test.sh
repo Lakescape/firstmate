@@ -104,12 +104,12 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
+  cp /usr/bin/perl "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
 set -u
 [ -n "${FM_FAKE_HARNESS_RESULT:-}" ] || exit 0
-exec "$FM_FAKE_MUSE_VERSIONED" -c 'result=$($FM_FAKE_HARNESS_PROBE); printf "%s" "$result" > "$FM_FAKE_HARNESS_RESULT"'
+exec "$FM_FAKE_MUSE_VERSIONED" -e '$result = qx{$ENV{FM_FAKE_HARNESS_PROBE}}; open my $fh, ">", $ENV{FM_FAKE_HARNESS_RESULT} or die $!; print {$fh} $result; close $fh or die $!;'
 SH
   chmod +x "$fakebin/muse"
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
@@ -181,10 +181,14 @@ test_detects_versioned_process_ancestor() {
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
-    cp "$(command -v bash)" "$dir/$bin"
+    # A copied Apple platform /bin/bash is killed by current macOS before it
+    # starts (exit 137). Perl remains resident while qx{} runs the probe and,
+    # once copied to the fixture name, gives ps the same process-name shape as
+    # Muse's versioned native executable.
+    cp /usr/bin/perl "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
-      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+      "$dir/$bin" -e 'print qx{'"$HARNESS"'}')
     [ "$out" = muse ] || fail "fm-harness.sh under process '$bin' reported '$out', expected muse"
   done
   pass "muse is detected through any versioned muse-bin ancestor"
@@ -197,10 +201,10 @@ test_detection_is_anchored() {
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
-    cp "$(command -v bash)" "$dir/$bin"
+    cp /usr/bin/perl "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
-      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+      "$dir/$bin" -e 'print qx{'"$HARNESS"'}')
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"
   done
   pass "muse detection does not claim unrelated muse-containing commands"
