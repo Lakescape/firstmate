@@ -1416,6 +1416,10 @@ Both files failed format validation, but the attempted loads establish ambient t
 On 2026-09-05, a live credential-free run with `PI_CODING_AGENT_DIR` isolated but the real `HOME` retained loaded the operator's `~/.claude.json` and attempted ambient MCP connections despite `--no-tools` and `--no-extensions`.
 That result established that those flags are requests rather than an MCP containment boundary.
 
+Two measured findings bound which consumer surfaces remain worth attempting.
+On 2026-08-24, source review invalidated an earlier RPC-based consumer result: OMP RPC mode constructs an agent session and may initialize a provider connection, so it falls outside this candidate's no-session and no-network verification authority.
+The unrelated Bun cache contains `@oh-my-pi/pi-coding-agent` 18.0.4, which cannot prove `omp/17.2.9` behavior.
+
 Readable strings in the provenance-matched v17.2.9 binary show that its native config root is `PI_CONFIG_DIR` under `os.homedir()`, its agent override is `PI_CODING_AGENT_DIR`, and its data, state, and cache roots can honor `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME`.
 The same readable bundle maps user compatibility discovery to `.claude`, `.codex`, `.gemini`, `.config/opencode`, `.cursor`, `.codeium/windsurf`, `.cline`, and `.vscode` under the discovery home.
 The Claude loader specifically composes `<home>/.claude.json` and `<home>/.claude/mcp.json`, while the Cursor loader composes `<home>/.cursor/mcp.json`.
@@ -1505,6 +1509,20 @@ Before dormancy can be reconsidered, all three independent mandatory prerequisit
 3. Complete provider-configured mid-inference interrupt, provider teardown, and successful replacement relaunch verification rather than treating the partial lifecycle results above as sufficient.
 
 No prerequisite substitutes for another.
+
+### OMP prerequisite refresh - 2026-09-14
+
+The pre-launch guard was rerun with `FM_OMP_LIFECYCLE_LIVE_E2E=1 FM_OMP_LIFECYCLE_PREFLIGHT_ONLY=1 tests/fm-omp-lifecycle-live-e2e.test.sh` and exited 0 without launching OMP.
+Its provenance check matched the installed artifact to the adjacent record's release `v17.2.9`, reported version `omp/17.2.9`, and SHA-256 `3f9c44c465da8428b5a81a0c9cdac22ced982319fe93d534914cb61838a63118`.
+The resolved scratch-agent assertion passed, `verify-boundary` reported `sources=19`, and the hostile HOME negative control returned `error: OMP launch boundary refused: HOME does not resolve to its isolated path`.
+`FM_OMP_TOOLS_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-omp-tools-live-e2e.test.sh` exited 1 with the refusal recorded above; a supported session-free consumer and effective built-in-tool removal remain unproven.
+
+Successful replacement relaunch is blocked by the current sequencing contract.
+Inspection of the public control owner shows that `bin/fm-control.sh` delegates replacement to `bin/fm-spawn.sh --relaunch`, where `refuse_omp_unverified_gates` unconditionally refuses OMP before launch.
+The private tmux guard can stage its initial process through the isolated manifest, but its public relaunch call reaches that same refusal; staging another process directly would not prove public-control-plane replacement.
+Keeping the refusal unconditional therefore prevents this prerequisite from passing in the current task.
+No provider binding or real lifecycle operation was attempted in this refresh, so provider-configured interrupt, provider teardown, and successful relaunch have no new live verdict.
+The earlier partial observations remain partial, and all mandatory proofs must be green before activation work can begin.
 
 ### 2026-09-04 off-thread supervision outcome delivery
 
