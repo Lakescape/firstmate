@@ -1,0 +1,7 @@
+cwd: /Users/austinlakescapes/.no-mistakes/worktrees/90205a2052fe/01M36BTMYFKG32ZXJEPC36VSQ2
+head: 37d9831f5ae4d8c2cb80c34ede6c376a04da3a15
+status:
+ M tests/fm-backend.test.sh
+command: FM_TEST_ONLY=test_spawn_symlinked_project_prefix_avoids_false_refusal /bin/bash tests/fm-backend.test.sh
+ok - fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal
+command_exit=0

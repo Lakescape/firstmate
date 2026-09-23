@@ -1,0 +1,10 @@
+cwd: /Users/austinlakescapes/.no-mistakes/worktrees/90205a2052fe/01M36BTMYFKG32ZXJEPC36VSQ2
+head: 37d9831f5ae4d8c2cb80c34ede6c376a04da3a15
+shell: GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
+
+control: existing tmux adapter loads and exposes fm_backend_tmux_capture
+adapter_loaded=tmux
+
+precheck cases through fm_backend_source under set -e:
+case=missing shell_exit=1 trap_status=1 continuation=absent stderr=
+case=unreadable shell_exit=1 trap_status=1 continuation=absent stderr=
