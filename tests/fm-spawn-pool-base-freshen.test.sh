@@ -764,4 +764,129 @@ test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
 
+
+test_default_freshen_records_measured_base() {
+  local rec id out status meta brief head tree cwd
+  id='pool-base-measure-r1'
+  rec=$(make_case measure-base "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "default freshen spawn should still launch"$'\n'"$out"
+  meta="$HOME_DIR/state/$id.meta"
+  brief="$HOME_DIR/data/$id/launch-brief.md"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  tree=$(git -C "$POOL_DIR" rev-parse 'HEAD^{tree}')
+  cwd=$(cd "$POOL_DIR" && pwd -P)
+
+  assert_grep "base_sha=$head" "$meta" "spawn meta must record measured post-freshen base_sha"
+  assert_grep "base_tree=$tree" "$meta" "spawn meta must record measured post-freshen base_tree"
+  assert_grep "base_cwd=$cwd" "$meta" "spawn meta must record measured post-freshen base_cwd"
+  [ -f "$brief" ] || fail "launch-brief.md missing after spawn"
+  assert_contains "$(cat "$brief")" "base_sha: $head" \
+    "FINAL launch-brief overlay must include measured base_sha"
+  assert_contains "$(cat "$brief")" "base_tree: $tree" \
+    "FINAL launch-brief overlay must include measured base_tree"
+  assert_contains "$(cat "$brief")" "base_cwd: $cwd" \
+    "FINAL launch-brief overlay must include measured base_cwd"
+  pass "default freshen records measured base_sha/tree/cwd in meta and FINAL launch-brief"
+}
+
+test_explicit_base_pins_without_advancing_past_request() {
+  local rec id out status meta pin tip head
+  id='pool-base-pin-r1'
+  rec=$(make_case pin-base "$id")
+  read_case_record "$rec"
+  pin=$INITIAL_SHA
+  # Resolve the advanced tip from the bare origin with a checked lookup. A
+  # pool-side origin/<branch> rev-parse can fail (unfetched) and still satisfy
+  # a bare inequality — that is the vacuous advancement precondition.
+  tip=$(git --git-dir="$CASE_DIR/origin.git" rev-parse --verify "refs/heads/$DEFAULT_BRANCH^{commit}")     || fail "bare origin fixture is missing refs/heads/$DEFAULT_BRANCH"
+  [ "$pin" != "$tip" ] || fail "fixture did not advance origin past the pin (both $pin)"
+
+  out=$(run_spawn "$id" --scout --base "$pin")
+  status=$?
+  expect_code 0 "$status" "explicit --base matching a reachable commit should launch"$'\n'"$out"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$pin" ] || fail "explicit --base landed on $head instead of requested $pin (tip was $tip)"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "base_sha=$pin" "$meta" "meta base_sha must equal the requested pin"
+  assert_grep "requested_base=$pin" "$meta" "meta must record requested_base"
+  assert_contains "$(cat "$HOME_DIR/data/$id/launch-brief.md")" "requested_base: $pin" \
+    "FINAL launch-brief must name the requested pin"
+  pass "explicit --base pins the worktree without silently advancing to origin tip"
+}
+
+test_explicit_base_unknown_sha_refuses() {
+  local rec id out status
+  id='pool-base-missing-r1'
+  rec=$(make_case missing-base "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --scout --base "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" 2>&1) || status=$?
+  status=${status:-0}
+  [ "$status" -ne 0 ] || fail "unknown --base must refuse launch"$'\n'"$out"
+  assert_contains "$out" "requested base" \
+    "refusal should name the requested base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused --base spawn published task metadata"
+  pass "unknown explicit --base refuses without publishing metadata"
+}
+
+test_ambient_base_arg_ignored_without_flag() {
+  local rec id out status head tip
+  id='pool-base-ambient-r1'
+  rec=$(make_case ambient-base "$id")
+  read_case_record "$rec"
+  tip=$(git --git-dir="$CASE_DIR/origin.git" rev-parse --verify "refs/heads/$DEFAULT_BRANCH^{commit}") \
+    || fail "bare origin fixture is missing refs/heads/$DEFAULT_BRANCH"
+
+  # An exported BASE_ARG must not change an omitted-flag launch (finding 3).
+  out=$(BASE_ARG=$INITIAL_SHA run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "omitted --base should still launch under ambient BASE_ARG"$'\n'"$out"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$head" = "$tip" ] || fail "ambient BASE_ARG='$INITIAL_SHA' changed the default freshen landing ($head), tip was $tip"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || ! grep -q "requested_base=" "$HOME_DIR/state/$id.meta" \
+    || fail "omitted --base recorded a requested_base from ambient BASE_ARG"
+  pass "ambient BASE_ARG is ignored when --base is omitted"
+}
+
+test_base_refused_with_relaunch_and_secondmate() {
+  local out status
+  out=$(bash "$ROOT/bin/fm-spawn.sh" --relaunch phantom-relaunch-r1 --base deadbeefdeadbeefdeadbeefdeadbeefdeadbeef 2>&1) || status=$?
+  status=${status:-0}
+  [ "$status" -ne 0 ] || fail "--base with --relaunch must refuse"$'\n'"$out"
+  assert_contains "$out" "not supported with --relaunch" \
+    "refusal should name the unsupported relaunch combination"
+
+  out=$(bash "$ROOT/bin/fm-spawn.sh" --secondmate phantom-second-r1 /tmp/fm-phantom-secondmate-home --base deadbeefdeadbeefdeadbeefdeadbeefdeadbeef 2>&1) || status=$?
+  status=${status:-0}
+  [ "$status" -ne 0 ] || fail "--base with --secondmate must refuse"$'\n'"$out"
+  assert_contains "$out" "not supported with --secondmate" \
+    "refusal should name the unsupported secondmate combination"
+  pass "--base is refused with --relaunch and --secondmate before side effects"
+}
+
+test_batch_forwards_base_to_each_pair() {
+  local trace pin
+  pin=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  # Argument-routing proof only: missing briefs fail after re-exec, so the
+  # traced child lines must still carry the shared --base (finding 1).
+  trace=$(bash -x "$ROOT/bin/fm-spawn.sh" \
+    "batch-base-a-z1=projects/none-a" "batch-base-b-z2=projects/none-b" \
+    --scout --base "$pin" 2>&1) || true
+  printf '%s\n' "$trace" | grep -F -- "--base $pin" | grep -F 'batch-base-a-z1' >/dev/null \
+    || fail "batch did not forward --base to the first pair re-exec"$'\n'"$trace"
+  printf '%s\n' "$trace" | grep -F -- "--base $pin" | grep -F 'batch-base-b-z2' >/dev/null \
+    || fail "batch did not forward --base to the second pair re-exec"$'\n'"$trace"
+  pass "batch dispatch forwards --base to every pair re-exec"
+}
+
+test_default_freshen_records_measured_base
+test_explicit_base_pins_without_advancing_past_request
+test_explicit_base_unknown_sha_refuses
+test_ambient_base_arg_ignored_without_flag
+test_base_refused_with_relaunch_and_secondmate
+test_batch_forwards_base_to_each_pair
 echo "# all fm-spawn-pool-base-freshen tests passed"

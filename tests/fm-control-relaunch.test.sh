@@ -2385,6 +2385,181 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+
+# --- allocation base pin (Astra finding5 / inbox 010-014) --------------------
+
+# Record a complete, exact commit pin for the task's current worktree.
+record_base_pin() {  # <case-dir> <id> -> prints sha
+  local dir=$1 id=$2 wt sha tree cwd
+  wt=$(meta_field "$dir" "$id" worktree)
+  sha=$(git -C "$wt" rev-parse HEAD)
+  tree=$(git -C "$wt" rev-parse 'HEAD^{tree}')
+  cwd=$(cd "$wt" && pwd -P)
+  {
+    echo "base_sha=$sha"
+    echo "base_tree=$tree"
+    echo "base_cwd=$cwd"
+  } >> "$dir/home/state/$id.meta"
+  printf '%s\n' "$sha"
+}
+
+allocation_base_count() {  # <file>
+  grep -c -E '^## Allocation base$' "$1" 2>/dev/null || true
+}
+
+test_control_relaunch_preserves_original_base_after_later_commits() {
+  local dir out rc=0 pin brief launch
+  dir=$(new_case base-preserve rl50)
+  add_ship_task "$dir" rl50 claude
+  pin=$(record_base_pin "$dir" rl50)
+  # Later worker commits must not relabel the allocation pin.
+  printf 'later worker work\n' > "$dir/wt/later.txt"
+  git -C "$dir/wt" add later.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'later worker commit'
+  brief="$dir/home/data/rl50/brief.md"
+  launch="$dir/home/data/rl50/launch-brief.md"
+  out=$(run_control "$dir" rl50 relaunch --note "continue after later commits") || rc=$?
+  expect_code 0 "$rc" "valid original base pin must survive later commits"$'\n'"$out"
+  [ "$(meta_field "$dir" rl50 base_sha)" = "$pin" ] \
+    || fail "relaunch relabeled base_sha to $(meta_field "$dir" rl50 base_sha), want $pin"
+  [ "$(allocation_base_count "$launch")" = 1 ] \
+    || fail "delivered launch-brief must carry exactly one Allocation base overlay, got $(allocation_base_count "$launch")"
+  assert_grep "base_sha: $pin" "$launch" "delivered overlay must name the original pin"
+  # Source brief must not receive the Allocation base overlay (progress note is fine).
+  assert_no_grep '## Allocation base' "$brief" \
+    "source brief must stay free of the Allocation base overlay"
+  # Stub harness launch argv must consume the launch-brief (delivered overlay).
+  assert_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
+    "stub harness launch must consume the launch-brief carrying the overlay"
+  pass "fm-control relaunch: original base pin survives later commits; overlay delivered once"
+}
+
+test_control_relaunch_legacy_absent_base_stays_unknown() {
+  local dir out rc=0 launch
+  dir=$(new_case base-legacy rl51)
+  add_ship_task "$dir" rl51 claude
+  # No base_* keys at all.
+  ! grep -E '^(base_sha|base_tree|base_cwd|requested_base)=' "$dir/home/state/rl51.meta" \
+    || fail "fixture must start with truly absent base bindings"
+  out=$(run_control "$dir" rl51 relaunch --note "legacy resume") || rc=$?
+  expect_code 0 "$rc" "truly absent legacy bindings must remain supported"$'\n'"$out"
+  ! grep -E '^(base_sha|base_tree|base_cwd)=' "$dir/home/state/rl51.meta" \
+    || fail "legacy relaunch invented base bindings: $(grep -E '^base_' "$dir/home/state/rl51.meta" || true)"
+  launch="$dir/home/data/rl51/launch-brief.md"
+  [ "$(allocation_base_count "$launch")" = 0 ] \
+    || fail "legacy unknown pin must omit the Allocation base overlay"
+  assert_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
+    "legacy relaunch must still deliver a launch-brief"
+  pass "fm-control relaunch: truly absent legacy base stays unknown and omits overlay"
+}
+
+test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
+  local dir out rc wt sha tree
+
+  # Empty-but-present keys.
+  dir=$(new_case base-empty rl52)
+  add_ship_task "$dir" rl52 claude
+  printf 'base_sha=\nbase_tree=\nbase_cwd=\n' >> "$dir/home/state/rl52.meta"
+  cp -p "$dir/home/state/rl52.meta" "$dir/meta.before"
+  : > "$dir/fake/literal"
+  rc=0
+  out=$(run_control "$dir" rl52 relaunch --note "empty keys") || rc=$?
+  expect_code 1 "$rc" "empty-but-present base keys must refuse"$'\n'"$out"
+  assert_contains "$out" "malformed allocation base pin" "empty keys should be named malformed"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl52.meta" \
+    || fail "empty-key refusal mutated meta before launch"
+  assert_not_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
+    "malformed empty-key relaunch must not launch"
+
+  # requested_base-only.
+  dir=$(new_case base-reqonly rl53)
+  add_ship_task "$dir" rl53 claude
+  printf 'requested_base=origin/main\n' >> "$dir/home/state/rl53.meta"
+  cp -p "$dir/home/state/rl53.meta" "$dir/meta.before"
+  rc=0
+  out=$(run_control "$dir" rl53 relaunch --note "req only") || rc=$?
+  expect_code 1 "$rc" "requested_base-only must refuse"$'\n'"$out"
+  assert_contains "$out" "malformed allocation base pin" "requested_base-only should be malformed"
+  cmp -s "$dir/meta.before" "$dir/home/state/rl53.meta" \
+    || fail "requested_base-only refusal mutated meta"
+
+  # Partial pin.
+  dir=$(new_case base-partial rl54)
+  add_ship_task "$dir" rl54 claude
+  wt=$(meta_field "$dir" rl54 worktree)
+  sha=$(git -C "$wt" rev-parse HEAD)
+  printf 'base_sha=%s\n' "$sha" >> "$dir/home/state/rl54.meta"
+  rc=0
+  out=$(run_control "$dir" rl54 relaunch --note "partial") || rc=$?
+  expect_code 1 "$rc" "partial base pin must refuse"$'\n'"$out"
+  assert_contains "$out" "malformed allocation base pin" "partial pin should be malformed"
+
+  # Duplicate keys.
+  dir=$(new_case base-dup rl55)
+  add_ship_task "$dir" rl55 claude
+  wt=$(meta_field "$dir" rl55 worktree)
+  sha=$(git -C "$wt" rev-parse HEAD)
+  tree=$(git -C "$wt" rev-parse 'HEAD^{tree}')
+  {
+    echo "base_sha=$sha"
+    echo "base_sha=$sha"
+    echo "base_tree=$tree"
+    echo "base_cwd=$(cd "$wt" && pwd -P)"
+  } >> "$dir/home/state/rl55.meta"
+  rc=0
+  out=$(run_control "$dir" rl55 relaunch --note "dup") || rc=$?
+  expect_code 1 "$rc" "duplicate base keys must refuse"$'\n'"$out"
+  assert_contains "$out" "duplicate base-binding keys" "duplicates should be named"
+
+  # Non-commit object (tree SHA recorded as base_sha).
+  dir=$(new_case base-treeobj rl56)
+  add_ship_task "$dir" rl56 claude
+  wt=$(meta_field "$dir" rl56 worktree)
+  tree=$(git -C "$wt" rev-parse 'HEAD^{tree}')
+  {
+    echo "base_sha=$tree"
+    echo "base_tree=$tree"
+    echo "base_cwd=$(cd "$wt" && pwd -P)"
+  } >> "$dir/home/state/rl56.meta"
+  rc=0
+  out=$(run_control "$dir" rl56 relaunch --note "tree as sha") || rc=$?
+  expect_code 1 "$rc" "tree-as-base_sha must refuse"$'\n'"$out"
+  assert_contains "$out" "not a commit" "tree object should be refused as base_sha"
+
+  # Ref name instead of exact commit SHA.
+  dir=$(new_case base-ref rl57)
+  add_ship_task "$dir" rl57 claude
+  wt=$(meta_field "$dir" rl57 worktree)
+  tree=$(git -C "$wt" rev-parse 'HEAD^{tree}')
+  {
+    echo "base_sha=HEAD"
+    echo "base_tree=$tree"
+    echo "base_cwd=$(cd "$wt" && pwd -P)"
+  } >> "$dir/home/state/rl57.meta"
+  rc=0
+  out=$(run_control "$dir" rl57 relaunch --note "ref") || rc=$?
+  expect_code 1 "$rc" "ref-as-base_sha must refuse"$'\n'"$out"
+
+  # Foreign cwd.
+  dir=$(new_case base-foreign rl58)
+  add_ship_task "$dir" rl58 claude
+  wt=$(meta_field "$dir" rl58 worktree)
+  sha=$(git -C "$wt" rev-parse HEAD)
+  tree=$(git -C "$wt" rev-parse 'HEAD^{tree}')
+  {
+    echo "base_sha=$sha"
+    echo "base_tree=$tree"
+    echo "base_cwd=/other"
+  } >> "$dir/home/state/rl58.meta"
+  rc=0
+  out=$(run_control "$dir" rl58 relaunch --note "foreign cwd") || rc=$?
+  expect_code 1 "$rc" "foreign base_cwd must refuse"$'\n'"$out"
+  assert_contains "$out" "does not match current worktree" "foreign cwd should be named"
+
+  pass "fm-control relaunch: malformed/empty/partial/duplicate/noncommit/ref/foreign base pins refuse before mutation"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -2457,3 +2632,6 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_control_relaunch_preserves_original_base_after_later_commits
+test_control_relaunch_legacy_absent_base_stays_unknown
+test_control_relaunch_refuses_malformed_base_pins_before_mutation
