@@ -165,15 +165,19 @@ test_resend_enqueues_new_sequence() {
 }
 
 test_pending_composer_skips_ring_advisorily() {
-  local dir err rc
+  local dir err rc count body
   dir=$(setup_case pendingskip); err="$dir/send.err"
   run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- t1 "steer past a stuck composer"; rc=$?
-  expect_code 0 "$rc" "a skipped ring is still a sent steer"
+  expect_code 0 "$rc" "accepted+warning busy/unreadable: a skipped ring is still a sent steer"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
-  [ ! -s "$dir/send.log" ] || fail "a visibly pending composer should skip the ring:"$'\n'"$(cat "$dir/send.log")"
+  count=$(find "$dir/home/state/t1.inbox" -maxdepth 1 -type f -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "accepted+warning must leave exactly one durable inbox record, got $count"
+  body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+  [ "$body" = "steer past a stuck composer" ] || fail "unexpected inbox body: $body"
+  [ ! -s "$dir/send.log" ] || fail "a visibly pending composer should skip the ring (no typed payload/resend):"$'\n'"$(cat "$dir/send.log")"
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the skip notice should point at the re-ring"
-  pass "fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent"
+  pass "fm-send inbox: accepted+warning busy/unreadable exits 0 with one durable inbox and no typed payload"
 }
 
 test_failed_ring_is_still_sent() {
