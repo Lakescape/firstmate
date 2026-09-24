@@ -73,6 +73,9 @@
 #   The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
+#   An invalid recorded allocation base pin is refused before that publish
+#   (bin/fm-base-pin-lib.sh), the same check fm-control.sh runs before it stops
+#   the previous agent.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -85,6 +88,9 @@
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   --base <ref> pins the pooled worktree freshen target (fail-closed). Omit to keep
+#   the default origin/<default-branch> freshen path unchanged. Secondmate spawns
+#   are outside worker base-binding; relaunch preserves the original allocation pin.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -626,6 +632,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-base-pin-lib.sh
+. "$SCRIPT_DIR/fm-base-pin-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -650,6 +658,8 @@ MODE_SET=0
 YOLO_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
+BASE_ARG=
+BASE_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -669,6 +679,10 @@ for a in "$@"; do
     model)
       MODEL=$a
       MODEL_SET=1
+      ;;
+    base)
+      BASE_ARG=$a
+      BASE_SET=1
       ;;
     effort)
       EFFORT=$a
@@ -722,6 +736,11 @@ for a in "$@"; do
     MODEL=${a#--model=}
     MODEL_SET=1
     ;;
+  --base) want_value=base ;;
+  --base=*)
+    BASE_ARG=${a#--base=}
+    BASE_SET=1
+    ;;
   --effort) want_value=effort ;;
   --effort=*)
     EFFORT=${a#--effort=}
@@ -767,6 +786,21 @@ done
   echo "error: --model requires a non-empty value" >&2
   exit 1
 }
+[ "$BASE_SET" -eq 0 ] || [ -n "$BASE_ARG" ] || {
+  echo "error: --base requires a non-empty value" >&2
+  exit 1
+}
+# Refuse unsupported --base combinations before any spawn side effects.
+if [ "$BASE_SET" -eq 1 ]; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    echo "error: --base is not supported with --relaunch; relaunch preserves the original allocation pin" >&2
+    exit 1
+  fi
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --base is not supported with --secondmate; secondmates are outside worker base-binding" >&2
+    exit 1
+  fi
+fi
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || {
   echo "error: --effort requires a non-empty value" >&2
   exit 1
@@ -1459,6 +1493,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  [ "$BASE_SET" -eq 0 ] || shared_args+=(--base "$BASE_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -3306,8 +3341,14 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+freshen_spawn_worktree_base() { # <worktree> [<explicit-base-ref>]
+  # Default path (no explicit ref): when an origin is configured, refresh that
+  # default branch and hard-reset the clean worktree to the exact commit.
+  # An origin-less worktree launches as-is. Explicit --base pins the freshen
+  # target and fail-closes when the ref cannot be resolved to a commit.
+  local worktree=$1
+  local explicit_base=${2:-}
+  local default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -3320,31 +3361,40 @@ freshen_spawn_worktree_base() { # <worktree>
     fi
     return 1
   fi
-  if ! spawn_worktree_has_origin_config "$worktree"; then
+  if [ -z "$explicit_base" ] && ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+
+  if [ -n "$explicit_base" ]; then
+    target=$explicit_base
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: requested base '$explicit_base' is not a commit for pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    }
+  else
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
   fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
-    echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -4262,7 +4312,65 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  if [ "$BASE_SET" -eq 1 ]; then
+    freshen_spawn_worktree_base "$WT" "$BASE_ARG" || exit 1
+  else
+    freshen_spawn_worktree_base "$WT" || exit 1
+  fi
+fi
+
+# Worker base-binding: record the allocation pin once, then keep it.
+# - Fresh non-secondmate spawn: measure post-freshen SHA/tree/cwd (fail-closed).
+# - Relaunch: preserve the original allocation pin from recorded meta
+#   (bin/fm-base-pin-lib.sh). Never relabel later worker commits as the starting base.
+# - Secondmate: outside worker base-binding — leave unset / unwritten.
+SPAWN_BASE_SHA=
+SPAWN_BASE_TREE=
+SPAWN_BASE_CWD=
+SPAWN_REQUESTED_BASE=
+if [ "$KIND" = secondmate ]; then
+  :
+elif [ "$RELAUNCH" -eq 1 ]; then
+  # Same owner fm-control.sh already ran before stopping the agent.
+  fm_relaunch_load_allocation_base "$ID" "$RELAUNCH_META" "$WT" || exit 1
+else
+  SPAWN_BASE_SHA=$(git -C "$WT" rev-parse HEAD) || {
+    echo "error: could not read HEAD SHA from spawn worktree '$WT' after base settle" >&2
+    exit 1
+  }
+  SPAWN_BASE_TREE=$(git -C "$WT" rev-parse 'HEAD^{tree}') || {
+    echo "error: could not read HEAD tree from spawn worktree '$WT' after base settle" >&2
+    exit 1
+  }
+  SPAWN_BASE_CWD=$(cd "$WT" && pwd -P) || {
+    echo "error: could not resolve physical cwd for spawn worktree '$WT' after base settle" >&2
+    exit 1
+  }
+  [ -n "$SPAWN_BASE_SHA" ] && [ -n "$SPAWN_BASE_TREE" ] && [ -n "$SPAWN_BASE_CWD" ] || {
+    echo "error: empty measured base pin for spawn worktree '$WT' (sha='$SPAWN_BASE_SHA' tree='$SPAWN_BASE_TREE' cwd='$SPAWN_BASE_CWD')" >&2
+    exit 1
+  }
+  if [ "$BASE_SET" -eq 1 ]; then
+    SPAWN_REQUESTED_BASE=$BASE_ARG
+  fi
+fi
+
+# FINAL launch-brief overlay: append measured (or preserved) base pin after settle.
+# Brief render above runs before freshen; this is the delivered overlay the worker sees.
+# Unknown legacy pins (empty) omit the overlay rather than inventing current HEAD.
+if [ "$KIND" != secondmate ] && [ -n "$SPAWN_BASE_SHA" ] && [ -n "${BRIEF:-}" ] && [ -f "$BRIEF" ]; then
+  {
+    printf '\n## Allocation base\n\n'
+    printf 'base_sha: %s\n' "$SPAWN_BASE_SHA"
+    printf 'base_tree: %s\n' "$SPAWN_BASE_TREE"
+    printf 'base_cwd: %s\n' "$SPAWN_BASE_CWD"
+    if [ -n "$SPAWN_REQUESTED_BASE" ]; then
+      printf 'requested_base: %s\n' "$SPAWN_REQUESTED_BASE"
+    fi
+  } >> "$BRIEF" || {
+    echo "error: could not append allocation base overlay to $BRIEF" >&2
+    exit 1
+  }
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
@@ -4814,7 +4922,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider base_sha base_tree base_cwd requested_base busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4837,6 +4945,12 @@ preserve_relaunch_meta() {
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
+  if [ "$KIND" != secondmate ] && [ -n "$SPAWN_BASE_SHA" ]; then
+    echo "base_sha=$SPAWN_BASE_SHA"
+    echo "base_tree=$SPAWN_BASE_TREE"
+    echo "base_cwd=$SPAWN_BASE_CWD"
+    [ -z "$SPAWN_REQUESTED_BASE" ] || echo "requested_base=$SPAWN_REQUESTED_BASE"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -5239,7 +5353,7 @@ spawn_launch_home_token() {
   esac
   printf '%s' "$hash"
 }
-LAUNCH_HOME_TOKEN=$(spawn_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
+LAUNCH_HOME_TOKEN=$( spawn_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
 if [ -z "$LAUNCH_HOME_TOKEN" ]; then
   echo "error: could not derive a home identity for the staged launch file" >&2
   exit 1
