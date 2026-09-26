@@ -1,0 +1,49 @@
+=== [TARGET bca1f0d] bash 3.2.57(1)-release  root=/Users/austinlakescapes/.no-mistakes/worktrees/90205a2052fe/01M3EGFQE4MDH1YFXVM1RP7KH8
+-- S1 normal durable wake append
+  append rc=0
+  marker(.watcher-down)=[pending:downtime:5053.1790415196.1FMkjo]
+  queue rows=1
+    row: 1790415196<TAB>1<TAB>check<TAB>task<TAB>check: normal
+  generation grammar: valid [5053.1790415196.1FMkjo]
+-- S2 date(1) failure during mint (fake date exits 1, no output)
+  append rc=0
+  marker(.watcher-down)=[pending:downtime:5581..RKm4iM]
+  queue rows=1
+    row: <TAB>1<TAB>signal<TAB>k<TAB>signal: date-miss
+  generation grammar: valid [5581..RKm4iM]
+-- S3 pid failure at mint only (fm_current_pid wrapped to fail only when called from _fm_recovery_marker_write_locked; locks still get a pid)
+  append rc=0
+  marker(.watcher-down)=[pending:downtime:.1790415196.T8r9uX]
+  queue rows=1
+    row: 1790415196<TAB>1<TAB>stale<TAB>k<TAB>stale: pid-miss
+  generation grammar: valid [.1790415196.T8r9uX]
+  stderr:   (fault) pid miss injected in _fm_recovery_marker_write_locked
+-- S4 wake-delivery log line (identity with TAB, reason with newline)
+  publish rc=0
+    log: 4242<TAB>pane id<TAB>signal: line1 line2
+  fields=3
+
+=== [BASE 72b63ee] bash 3.2.57(1)-release  root=/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T//fm-mint.kMc649/base
+-- S1 normal durable wake append
+  append rc=0
+  marker(.watcher-down)=[pending:downtime:7114.1790415197.pYExGP]
+  queue rows=1
+    row: 1790415197<TAB>1<TAB>check<TAB>task<TAB>check: normal
+  generation grammar: valid [7114.1790415197.pYExGP]
+-- S2 date(1) failure during mint (fake date exits 1, no output)
+  append rc=0
+  marker(.watcher-down)=[pending:downtime:8039..tlJql7]
+  queue rows=1
+    row: <TAB>1<TAB>signal<TAB>k<TAB>signal: date-miss
+  generation grammar: valid [8039..tlJql7]
+-- S3 pid failure at mint only (fm_current_pid wrapped to fail only when called from _fm_recovery_marker_write_locked; locks still get a pid)
+  append rc=0
+  marker(.watcher-down)=[pending:downtime:.1790415197.gU2xlg]
+  queue rows=1
+    row: 1790415197<TAB>1<TAB>stale<TAB>k<TAB>stale: pid-miss
+  generation grammar: valid [.1790415197.gU2xlg]
+  stderr:   (fault) pid miss injected in _fm_recovery_marker_write_locked
+-- S4 wake-delivery log line (identity with TAB, reason with newline)
+  publish rc=0
+    log: 4242<TAB>pane id<TAB>signal: line1 line2
+  fields=3
