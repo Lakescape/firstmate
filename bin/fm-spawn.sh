@@ -75,6 +75,9 @@
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
 #   that has drifted out of the recorded worktree is told once to return, and
 #   only a shell that will not go refuses.
+#   An invalid recorded allocation base pin is refused before that publish
+#   (bin/fm-base-pin-lib.sh), the same check fm-control.sh runs before it stops
+#   the previous agent.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -631,6 +634,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-base-pin-lib.sh
+. "$SCRIPT_DIR/fm-base-pin-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -4353,9 +4358,9 @@ fi
 
 # Worker base-binding: record the allocation pin once, then keep it.
 # - Fresh non-secondmate spawn: measure post-freshen SHA/tree/cwd (fail-closed).
-# - Relaunch: preserve the original allocation pin from recorded meta (never
-#   relabel later worker commits as the starting base).
-# - Secondmate: outside worker base-binding — leave unset / unwritten.
+# - Relaunch: preserve the original allocation pin from recorded meta
+#   (bin/fm-base-pin-lib.sh). Never relabel later worker commits as the starting base.
+# - Secondmate: outside worker base-binding - leave unset / unwritten.
 SPAWN_BASE_SHA=
 SPAWN_BASE_TREE=
 SPAWN_BASE_CWD=
@@ -4363,80 +4368,8 @@ SPAWN_REQUESTED_BASE=
 if [ "$KIND" = secondmate ]; then
   :
 elif [ "$RELAUNCH" -eq 1 ]; then
-  # Distinguish truly absent legacy bindings by FIELD COUNTS, not concatenated
-  # values. Empty-but-present keys or requested_base-only are malformed, not
-  # legacy. Validate base_sha as an exact commit object before matching its
-  # tree. Canonical recorded base_cwd must equal the current worktree.
-  _base_sha_n=$(grep -c -E '^base_sha=' "$RELAUNCH_META" 2>/dev/null || true)
-  _base_tree_n=$(grep -c -E '^base_tree=' "$RELAUNCH_META" 2>/dev/null || true)
-  _base_cwd_n=$(grep -c -E '^base_cwd=' "$RELAUNCH_META" 2>/dev/null || true)
-  _req_base_n=$(grep -c -E '^requested_base=' "$RELAUNCH_META" 2>/dev/null || true)
-  for _n in "$_base_sha_n" "$_base_tree_n" "$_base_cwd_n" "$_req_base_n"; do
-    case "$_n" in
-      0|1) ;;
-      *) echo "error: relaunch of $ID has duplicate base-binding keys in recorded meta; refusing to guess which pin is authoritative" >&2; exit 1 ;;
-    esac
-  done
-  SPAWN_BASE_SHA=$(grep -E '^base_sha=' "$RELAUNCH_META" 2>/dev/null | head -n1 | cut -d= -f2-)
-  SPAWN_BASE_TREE=$(grep -E '^base_tree=' "$RELAUNCH_META" 2>/dev/null | head -n1 | cut -d= -f2-)
-  SPAWN_BASE_CWD=$(grep -E '^base_cwd=' "$RELAUNCH_META" 2>/dev/null | head -n1 | cut -d= -f2-)
-  SPAWN_REQUESTED_BASE=$(grep -E '^requested_base=' "$RELAUNCH_META" 2>/dev/null | head -n1 | cut -d= -f2-)
-  _pin_key_n=$((_base_sha_n + _base_tree_n + _base_cwd_n))
-  if [ "$_pin_key_n" -eq 0 ] && [ "$_req_base_n" -eq 0 ]; then
-    # Truly absent legacy bindings: leave the pin unknown (do not invent from HEAD).
-    SPAWN_BASE_SHA=
-    SPAWN_BASE_TREE=
-    SPAWN_BASE_CWD=
-    SPAWN_REQUESTED_BASE=
-  elif [ "$_base_sha_n" -eq 1 ] && [ "$_base_tree_n" -eq 1 ] && [ "$_base_cwd_n" -eq 1 ] \
-    && [ -n "$SPAWN_BASE_SHA" ] && [ -n "$SPAWN_BASE_TREE" ] && [ -n "$SPAWN_BASE_CWD" ]; then
-    case "$SPAWN_BASE_CWD" in
-      /*) ;;
-      *) echo "error: relaunch of $ID has a non-absolute base_cwd in recorded meta; refusing" >&2; exit 1 ;;
-    esac
-    _wt_cwd=$(cd "$WT" && pwd -P) || {
-      echo "error: relaunch of $ID could not resolve current worktree cwd for base_cwd check" >&2
-      exit 1
-    }
-    _base_cwd_phys=
-    if [ -d "$SPAWN_BASE_CWD" ]; then
-      _base_cwd_phys=$(cd "$SPAWN_BASE_CWD" && pwd -P) || _base_cwd_phys=
-    fi
-    if [ "$SPAWN_BASE_CWD" != "$_wt_cwd" ] && [ "$SPAWN_BASE_CWD" != "$WT" ] \
-      && { [ -z "$_base_cwd_phys" ] || [ "$_base_cwd_phys" != "$_wt_cwd" ]; }; then
-      echo "error: relaunch of $ID recorded base_cwd='$SPAWN_BASE_CWD' does not match current worktree '$_wt_cwd'; refusing" >&2
-      exit 1
-    fi
-    # Exact commit object first; rev-parse SHA^{tree} alone accepts a tree/ref.
-    _obj_type=$(git -C "$WT" cat-file -t "$SPAWN_BASE_SHA" 2>/dev/null) || {
-      echo "error: relaunch of $ID recorded base_sha='$SPAWN_BASE_SHA' is not a git object in worktree '$WT'; refusing" >&2
-      exit 1
-    }
-    [ "$_obj_type" = commit ] || {
-      echo "error: relaunch of $ID recorded base_sha='$SPAWN_BASE_SHA' is a $_obj_type, not a commit; refusing" >&2
-      exit 1
-    }
-    _full_commit=$(git -C "$WT" rev-parse --verify --quiet "$SPAWN_BASE_SHA^{commit}" 2>/dev/null) || {
-      echo "error: relaunch of $ID recorded base_sha='$SPAWN_BASE_SHA' could not be resolved as a commit; refusing" >&2
-      exit 1
-    }
-    [ "$_full_commit" = "$SPAWN_BASE_SHA" ] || {
-      echo "error: relaunch of $ID recorded base_sha='$SPAWN_BASE_SHA' is not an exact commit object SHA (resolves to '$_full_commit'); refusing" >&2
-      exit 1
-    }
-    _expected_tree=$(git -C "$WT" rev-parse --verify --quiet "$_full_commit^{tree}" 2>/dev/null) || {
-      echo "error: relaunch of $ID could not resolve the tree for base_sha='$SPAWN_BASE_SHA'; refusing" >&2
-      exit 1
-    }
-    [ "$_expected_tree" = "$SPAWN_BASE_TREE" ] || {
-      echo "error: relaunch of $ID recorded base_tree='$SPAWN_BASE_TREE' does not match base_sha='$SPAWN_BASE_SHA' (expected '$_expected_tree'); refusing" >&2
-      exit 1
-    }
-  else
-    # Empty-but-present keys, partial set, or requested_base-only: malformed.
-    echo "error: relaunch of $ID has a malformed allocation base pin in recorded meta; refusing" >&2
-    exit 1
-  fi
+  # Same owner fm-control.sh already ran before stopping the agent.
+  fm_relaunch_load_allocation_base "$ID" "$RELAUNCH_META" "$WT" || exit 1
 else
   SPAWN_BASE_SHA=$(git -C "$WT" rev-parse HEAD) || {
     echo "error: could not read HEAD SHA from spawn worktree '$WT' after base settle" >&2
