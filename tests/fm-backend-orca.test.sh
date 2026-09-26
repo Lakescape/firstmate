@@ -773,55 +773,96 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
 }
 
-test_peek_send_and_crew_state_route_through_orca_meta() {
-  local wt state id out neutral record body status inbox_count
-  id="orcaiopathz2"
-  wt="$TMP_ROOT/io-wt"
+# Accepted+warning JSON for one Orca terminal send. ok:true with input_accepted
+# stays success; the warning code is what the caller must see on a send, not a read.
+orca_send_warning_json() {  # <code> <message>
+  printf '%s\n' "{\"ok\":true,\"result\":{\"send\":{\"handle\":\"term-io\",\"accepted\":true,\"prompt\":{\"stages\":[\"input_accepted\"]}}},\"warnings\":[{\"code\":\"$1\",\"message\":\"$2\"}]}"
+}
+
+# The fake serves RESP/N.out to the Nth orca invocation. A warning variant is
+# proven only when that file is consumed by terminal send, not by terminal read.
+assert_warning_responses_land_on_sends() {  # <log> <resp-dir> <code>
+  local log=$1 resp=$2 code=$3 i=0 line sends=0 body
+  while IFS= read -r line || [ -n "$line" ]; do
+    i=$((i + 1))
+    case "$line" in
+      *$'terminal\x1fsend\x1f'*)
+        sends=$((sends + 1))
+        body=$(cat "$resp/$i.out")
+        assert_contains "$body" "\"code\":\"$code\"" \
+          "response $i is a terminal send and must carry warning $code"
+        ;;
+      *$'terminal\x1fread\x1f'*)
+        [ -f "$resp/$i.out" ] || fail "terminal read $i has no response file"
+        body=$(cat "$resp/$i.out")
+        assert_not_contains "$body" "\"code\":\"$code\"" \
+          "response $i is a terminal read and must not carry warning $code"
+        ;;
+    esac
+  done < "$log"
+  [ "$sends" -ge 2 ] || fail "warning $code must land on the literal send and the Enter send, saw $sends"
+}
+
+# One warning variant, aligned to the send calls inside peek + inbox ring + crew-state.
+# Call order: peek read, composer read, literal doorbell send, Enter send,
+# composer read, crew-state read.
+run_orca_inbox_warning_variant() {  # <code> <message> <task-id> <case-name>
+  local code=$1 message=$2 id=$3 case_name=$4
+  local wt state out neutral record body status inbox_count
+  wt="$TMP_ROOT/$case_name-wt"
   fm_git_init_commit "$wt"
-  state="$TMP_ROOT/io-state"; mkdir -p "$state"
+  state="$TMP_ROOT/$case_name-state"; mkdir -p "$state"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-io" "worktree=$wt" "project=$wt" "harness=claude" "kind=scout" "backend=orca"
   touch "$state/.last-watcher-beat"
-  orca_case io-path
+  orca_case "$case_name"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   printf '{"ok":true,"result":{"terminal":{"tail":["ready"]}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/2.out"
+  orca_send_warning_json "$code" "$message" > "$RESP/3.out"
+  orca_send_warning_json "$code" "$message" > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/6.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
-  [ "$out" = ready ] || fail "fm-peek should read through Orca metadata, got '$out'"
-  # Real accepted+warning shape: accepted:true, prompt.stages input_accepted,
-  # warnings[] for busy/unreadable composer (Astra 014). Must stay exit 0 with
-  # exactly one durable inbox record and no typed payload/resend.
-  printf '%s\n' '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true,"prompt":{"stages":["input_accepted"]}},"warnings":[{"code":"composer_busy","message":"composer busy"}]}}' > "$RESP/2.out"
-  printf '%s\n' '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true,"prompt":{"stages":["input_accepted"]}},"warnings":[{"code":"composer_unreadable","message":"composer unreadable"}]}}' > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/4.out"
-  # Capture exit without flipping the suite's errexit state — a later fail-closed
+  [ "$out" = ready ] || fail "fm-peek should read through Orca metadata for $code, got '$out'"
+  # Capture exit without flipping the suite's errexit state. A later fail-closed
   # peek must be allowed to return non-zero inside $(...).
   status=0
   PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca" || status=$?
-  expect_code 0 "$status" "accepted+input_accepted+warnings busy/unreadable must exit 0"
-  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/5.out"
+  expect_code 0 "$status" "accepted+input_accepted+$code warning must exit 0"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
-  assert_contains "$out" "state: unknown" "crew-state should fall back cleanly for an idle Orca scout"
+  assert_contains "$out" "state: unknown" "crew-state should fall back cleanly for an idle Orca scout ($code)"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-io' \
-    "peek/crew-state did not read the recorded Orca terminal"
+    "peek/crew-state did not read the recorded Orca terminal ($code)"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f'"fm-$id" \
-    "crew-state should not read the stable Orca alias as a terminal handle"
+    "crew-state should not read the stable Orca alias as a terminal handle ($code)"
   record="$state/$id.inbox/001.msg"
-  [ -f "$record" ] || fail "send did not enqueue through the task inbox"
+  [ -f "$record" ] || fail "send did not enqueue through the task inbox ($code)"
   inbox_count=$(find "$state/$id.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
-  [ "$inbox_count" = 1 ] || fail "accepted+warning must leave exactly one durable inbox record, got $inbox_count"
+  [ "$inbox_count" = 1 ] || fail "accepted+warning must leave exactly one durable inbox record for $code, got $inbox_count"
   body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$record")
-  [ "$body" = "hello orca" ] || fail "Orca task inbox did not preserve the send body, got '$body'"
+  [ "$body" = "hello orca" ] || fail "Orca task inbox did not preserve the send body for $code, got '$body'"
   assert_not_contains "$(cat "$LOG")" $'--text\x1fhello orca\x1f' \
-    "send typed the payload instead of recording it (no typed resend on accepted+warning)"
+    "send typed the payload instead of recording it for $code (no typed resend on accepted+warning)"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f'': Firstmate instruction waiting:' \
-    "send did not ring the inbox doorbell through the recorded Orca terminal"
+    "send did not ring the inbox doorbell through the recorded Orca terminal ($code)"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-io'$'\x1f''--text'$'\x1f\x1f''--enter'$'\x1f''--json' \
-    "send did not submit the doorbell through the recorded Orca terminal"
+    "send did not submit the doorbell through the recorded Orca terminal ($code)"
+  assert_warning_responses_land_on_sends "$LOG" "$RESP" "$code"
+}
+
+test_peek_send_and_crew_state_route_through_orca_meta() {
+  # Real accepted+warning shape: accepted:true, prompt.stages input_accepted,
+  # warnings[] for busy/unreadable composer (Astra 014). Each variant is the
+  # response of an actual terminal send. Must stay exit 0 with exactly one
+  # durable inbox record and no typed payload/resend.
+  run_orca_inbox_warning_variant composer_busy "composer busy" orcabusyz2 io-busy
+  run_orca_inbox_warning_variant composer_unreadable "composer unreadable" orcaunrdz2 io-unreadable
   pass "fm-peek/fm-send/fm-crew-state route through backend=orca metadata and its durable inbox"
 }
 
