@@ -50,7 +50,8 @@ fm_relaunch_load_allocation_base() {  # <id> <meta-file> <worktree>
     # shellcheck disable=SC2034 # Consumed by the sourcing script after this function returns.
     SPAWN_REQUESTED_BASE=
   elif [ "$_base_sha_n" -eq 1 ] && [ "$_base_tree_n" -eq 1 ] && [ "$_base_cwd_n" -eq 1 ] \
-    && [ -n "$SPAWN_BASE_SHA" ] && [ -n "$SPAWN_BASE_TREE" ] && [ -n "$SPAWN_BASE_CWD" ]; then
+    && [ -n "$SPAWN_BASE_SHA" ] && [ -n "$SPAWN_BASE_TREE" ] && [ -n "$SPAWN_BASE_CWD" ] \
+    && { [ "$_req_base_n" -eq 0 ] || [ -n "$SPAWN_REQUESTED_BASE" ]; }; then
     case "$SPAWN_BASE_CWD" in
       /*) ;;
       *) echo "error: relaunch of $id has a non-absolute base_cwd in recorded meta; refusing" >&2; return 1 ;;

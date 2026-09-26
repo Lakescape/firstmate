@@ -2407,6 +2407,40 @@ allocation_base_count() {  # <file>
   grep -c -E '^## Allocation base$' "$1" 2>/dev/null || true
 }
 
+# Snapshot the instructions and metadata, and clear the fake pane, before a
+# relaunch that must refuse without touching either.
+snapshot_pin_case() {  # <case-dir> <id>
+  local dir=$1 id=$2
+  cp -p "$dir/home/data/$id/brief.md" "$dir/brief.before"
+  cp -p "$dir/home/state/$id.meta" "$dir/meta.before"
+  : > "$dir/fake/literal"
+  printf 'claude' > "$dir/fake/command"
+}
+
+# Upstream launches through the operational inbox. Older stubs still source
+# the staged brief with encode launch-brief. Either line is the replacement.
+launch_consumed_brief() { # <literal>
+  case "$1" in
+    *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) return 0 ;;
+  esac
+  return 1
+}
+
+# A preflight pin refusal leaves the original agent running: no /exit, and the
+# brief and metadata bytes are unchanged.
+assert_pin_refusal_preserves_agent() {  # <case-dir> <id>
+  local dir=$1 id=$2 literal
+  literal=$(cat "$dir/fake/literal")
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "pin refusal for $id stopped the original agent (command is $(cat "$dir/fake/command"))"
+  assert_not_contains "$literal" "/exit" \
+    "pin refusal for $id must not send /exit"
+  cmp -s "$dir/brief.before" "$dir/home/data/$id/brief.md" \
+    || fail "pin refusal for $id changed the brief"
+  cmp -s "$dir/meta.before" "$dir/home/state/$id.meta" \
+    || fail "pin refusal for $id changed metadata"
+}
+
 test_control_relaunch_preserves_original_base_after_later_commits() {
   local dir out rc=0 pin brief launch
   dir=$(new_case base-preserve rl50)
@@ -2430,8 +2464,8 @@ test_control_relaunch_preserves_original_base_after_later_commits() {
   assert_no_grep '## Allocation base' "$brief" \
     "source brief must stay free of the Allocation base overlay"
   # Stub harness launch argv must consume the launch-brief (delivered overlay).
-  assert_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
-    "stub harness launch must consume the launch-brief carrying the overlay"
+  launch_consumed_brief "$(cat "$dir/fake/literal")" \
+    || fail "stub harness launch must consume the launch-brief carrying the overlay"
   pass "fm-control relaunch: original base pin survives later commits; overlay delivered once"
 }
 
@@ -2449,40 +2483,49 @@ test_control_relaunch_legacy_absent_base_stays_unknown() {
   launch="$dir/home/data/rl51/launch-brief.md"
   [ "$(allocation_base_count "$launch")" = 0 ] \
     || fail "legacy unknown pin must omit the Allocation base overlay"
-  assert_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
-    "legacy relaunch must still deliver a launch-brief"
+  launch_consumed_brief "$(cat "$dir/fake/literal")" \
+    || fail "legacy relaunch must still deliver a launch-brief"
   pass "fm-control relaunch: truly absent legacy base stays unknown and omits overlay"
 }
 
 test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
   local dir out rc wt sha tree
 
-  # Empty-but-present keys.
-  dir=$(new_case base-empty rl52)
-  add_ship_task "$dir" rl52 claude
-  printf 'base_sha=\nbase_tree=\nbase_cwd=\n' >> "$dir/home/state/rl52.meta"
-  cp -p "$dir/home/state/rl52.meta" "$dir/meta.before"
-  : > "$dir/fake/literal"
+  # Audit reproduction: empty-but-present pins refuse before the agent stops.
+  dir=$(new_case audit-malformed audit-pin-order)
+  add_ship_task "$dir" audit-pin-order claude
+  printf 'base_sha=\nbase_tree=\nbase_cwd=\n' >> "$dir/home/state/audit-pin-order.meta"
+  snapshot_pin_case "$dir" audit-pin-order
   rc=0
-  out=$(run_control "$dir" rl52 relaunch --note "empty keys") || rc=$?
+  out=$(run_control "$dir" audit-pin-order relaunch --note "audit malformed pin") || rc=$?
   expect_code 1 "$rc" "empty-but-present base keys must refuse"$'\n'"$out"
   assert_contains "$out" "malformed allocation base pin" "empty keys should be named malformed"
-  cmp -s "$dir/meta.before" "$dir/home/state/rl52.meta" \
-    || fail "empty-key refusal mutated meta before launch"
-  assert_not_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
-    "malformed empty-key relaunch must not launch"
+  assert_pin_refusal_preserves_agent "$dir" audit-pin-order
+  launch_consumed_brief "$(cat "$dir/fake/literal")" \
+    && fail "malformed empty-key relaunch must not launch"
 
   # requested_base-only.
   dir=$(new_case base-reqonly rl53)
   add_ship_task "$dir" rl53 claude
   printf 'requested_base=origin/main\n' >> "$dir/home/state/rl53.meta"
-  cp -p "$dir/home/state/rl53.meta" "$dir/meta.before"
+  snapshot_pin_case "$dir" rl53
   rc=0
   out=$(run_control "$dir" rl53 relaunch --note "req only") || rc=$?
   expect_code 1 "$rc" "requested_base-only must refuse"$'\n'"$out"
   assert_contains "$out" "malformed allocation base pin" "requested_base-only should be malformed"
-  cmp -s "$dir/meta.before" "$dir/home/state/rl53.meta" \
-    || fail "requested_base-only refusal mutated meta"
+  assert_pin_refusal_preserves_agent "$dir" rl53
+
+  # A complete pin does not make an empty-but-present requested_base valid.
+  dir=$(new_case base-reqempty reqempty)
+  add_ship_task "$dir" reqempty claude
+  record_base_pin "$dir" reqempty >/dev/null
+  printf 'requested_base=\n' >> "$dir/home/state/reqempty.meta"
+  snapshot_pin_case "$dir" reqempty
+  rc=0
+  out=$(run_control "$dir" reqempty relaunch --note "empty requested base") || rc=$?
+  expect_code 1 "$rc" "empty requested_base must refuse before stop"$'\n'"$out"
+  assert_contains "$out" "malformed allocation base pin" "empty requested_base should be malformed"
+  assert_pin_refusal_preserves_agent "$dir" reqempty
 
   # Partial pin.
   dir=$(new_case base-partial rl54)
@@ -2490,10 +2533,12 @@ test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
   wt=$(meta_field "$dir" rl54 worktree)
   sha=$(git -C "$wt" rev-parse HEAD)
   printf 'base_sha=%s\n' "$sha" >> "$dir/home/state/rl54.meta"
+  snapshot_pin_case "$dir" rl54
   rc=0
   out=$(run_control "$dir" rl54 relaunch --note "partial") || rc=$?
   expect_code 1 "$rc" "partial base pin must refuse"$'\n'"$out"
   assert_contains "$out" "malformed allocation base pin" "partial pin should be malformed"
+  assert_pin_refusal_preserves_agent "$dir" rl54
 
   # Duplicate keys.
   dir=$(new_case base-dup rl55)
@@ -2507,10 +2552,12 @@ test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
     echo "base_tree=$tree"
     echo "base_cwd=$(cd "$wt" && pwd -P)"
   } >> "$dir/home/state/rl55.meta"
+  snapshot_pin_case "$dir" rl55
   rc=0
   out=$(run_control "$dir" rl55 relaunch --note "dup") || rc=$?
   expect_code 1 "$rc" "duplicate base keys must refuse"$'\n'"$out"
   assert_contains "$out" "duplicate base-binding keys" "duplicates should be named"
+  assert_pin_refusal_preserves_agent "$dir" rl55
 
   # Non-commit object (tree SHA recorded as base_sha).
   dir=$(new_case base-treeobj rl56)
@@ -2522,10 +2569,12 @@ test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
     echo "base_tree=$tree"
     echo "base_cwd=$(cd "$wt" && pwd -P)"
   } >> "$dir/home/state/rl56.meta"
+  snapshot_pin_case "$dir" rl56
   rc=0
   out=$(run_control "$dir" rl56 relaunch --note "tree as sha") || rc=$?
   expect_code 1 "$rc" "tree-as-base_sha must refuse"$'\n'"$out"
   assert_contains "$out" "not a commit" "tree object should be refused as base_sha"
+  assert_pin_refusal_preserves_agent "$dir" rl56
 
   # Ref name instead of exact commit SHA.
   dir=$(new_case base-ref rl57)
@@ -2537,9 +2586,11 @@ test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
     echo "base_tree=$tree"
     echo "base_cwd=$(cd "$wt" && pwd -P)"
   } >> "$dir/home/state/rl57.meta"
+  snapshot_pin_case "$dir" rl57
   rc=0
   out=$(run_control "$dir" rl57 relaunch --note "ref") || rc=$?
   expect_code 1 "$rc" "ref-as-base_sha must refuse"$'\n'"$out"
+  assert_pin_refusal_preserves_agent "$dir" rl57
 
   # Foreign cwd.
   dir=$(new_case base-foreign rl58)
@@ -2552,12 +2603,36 @@ test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
     echo "base_tree=$tree"
     echo "base_cwd=/other"
   } >> "$dir/home/state/rl58.meta"
+  snapshot_pin_case "$dir" rl58
   rc=0
   out=$(run_control "$dir" rl58 relaunch --note "foreign cwd") || rc=$?
   expect_code 1 "$rc" "foreign base_cwd must refuse"$'\n'"$out"
   assert_contains "$out" "does not match current worktree" "foreign cwd should be named"
+  assert_pin_refusal_preserves_agent "$dir" rl58
 
-  pass "fm-control relaunch: malformed/empty/partial/duplicate/noncommit/ref/foreign base pins refuse before mutation"
+  # Mismatched tree: an exact commit whose tree is not the recorded base_tree.
+  dir=$(new_case base-mismatch rl59)
+  add_ship_task "$dir" rl59 claude
+  wt=$(meta_field "$dir" rl59 worktree)
+  printf 'mismatch\n' > "$dir/wt/mismatch.txt"
+  git -C "$dir/wt" add mismatch.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'pin mismatch commit'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  tree=$(git -C "$wt" rev-parse 'HEAD^^{tree}')
+  {
+    echo "base_sha=$sha"
+    echo "base_tree=$tree"
+    echo "base_cwd=$(cd "$wt" && pwd -P)"
+  } >> "$dir/home/state/rl59.meta"
+  snapshot_pin_case "$dir" rl59
+  rc=0
+  out=$(run_control "$dir" rl59 relaunch --note "mismatched tree") || rc=$?
+  expect_code 1 "$rc" "mismatched base_tree must refuse"$'\n'"$out"
+  assert_contains "$out" "does not match" "mismatched tree should be named"
+  assert_pin_refusal_preserves_agent "$dir" rl59
+
+  pass "fm-control relaunch: malformed/empty/partial/duplicate/noncommit/ref/foreign/mismatched base pins refuse before stopping the agent"
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
