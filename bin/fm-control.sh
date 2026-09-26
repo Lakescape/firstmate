@@ -46,6 +46,10 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              A ship or scout relaunch refuses an invalid recorded allocation
+#              base pin before the checkpoint, the progress note, or the stop
+#              (bin/fm-base-pin-lib.sh). fm-spawn.sh repeats that check before
+#              publishing the replacement.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -132,6 +136,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-base-pin-lib.sh
+. "$SCRIPT_DIR/fm-base-pin-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -814,6 +820,11 @@ do_relaunch() {
     note_line="note=none"
   fi
   safe_checkpoint
+  # Pin refusal stays on the pre-stop side of the transaction. A secondmate is
+  # outside worker base-binding, so its relaunch does not consult the pin.
+  if [ "$KIND" != secondmate ]; then
+    fm_relaunch_load_allocation_base "$ID" "$META" "$WT" || exit 1
+  fi
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
   RELAUNCH_ACTIVE=1
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
