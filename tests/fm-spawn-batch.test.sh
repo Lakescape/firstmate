@@ -143,8 +143,40 @@ test_scout_batch_refuses_delivery_flags() {
   pass "scout batch refuses ship delivery flags instead of ignoring them"
 }
 
+# Two-child --base: every pair re-exec must carry the shared pin (Astra 010).
+test_batch_forwards_base_to_both_children() {
+  local trace pin
+  pin=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  trace=$(bash -x "$SPAWN" \
+    "batch-base-a-z21=projects/none-a" "batch-base-b-z22=projects/none-b" \
+    --scout --base "$pin" 2>&1) || true
+  printf '%s\n' "$trace" | grep -F -- "--base $pin" | grep -F 'batch-base-a-z21' >/dev/null \
+    || fail "batch did not forward --base to the first pair re-exec"$'\n'"$trace"
+  printf '%s\n' "$trace" | grep -F -- "--base $pin" | grep -F 'batch-base-b-z22' >/dev/null \
+    || fail "batch did not forward --base to the second pair re-exec"$'\n'"$trace"
+  pass "batch dispatch forwards --base to both child re-execs"
+}
+
+# Unsupported --base on relaunch/secondmate must refuse before mutation.
+test_batch_path_base_still_refuses_relaunch_and_secondmate() {
+  local out status
+  out=$(run_spawn --relaunch phantom-batch-rl-z23 --base deadbeefdeadbeefdeadbeefdeadbeefdeadbeef)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--base with --relaunch must refuse"$'\n'"$out"
+  printf '%s\n' "$out" | grep -F 'not supported with --relaunch' >/dev/null \
+    || fail "refusal should name the unsupported relaunch combination"$'\n'"$out"
+  out=$(run_spawn --secondmate phantom-batch-sm-z24 /tmp/fm-phantom-secondmate-home --base deadbeefdeadbeefdeadbeefdeadbeefdeadbeef)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--base with --secondmate must refuse"$'\n'"$out"
+  printf '%s\n' "$out" | grep -F 'not supported with --secondmate' >/dev/null \
+    || fail "refusal should name the unsupported secondmate combination"$'\n'"$out"
+  pass "batch-surface --base refusals for relaunch/secondmate stay fail-closed"
+}
+
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping
+test_batch_forwards_base_to_both_children
+test_batch_path_base_still_refuses_relaunch_and_secondmate
