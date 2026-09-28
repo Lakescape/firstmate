@@ -2418,6 +2418,15 @@ snapshot_pin_case() {  # <case-dir> <id>
   printf 'claude' > "$dir/fake/command"
 }
 
+# Upstream launches through the operational inbox. Older stubs still source
+# the staged brief with encode launch-brief. Either line is the replacement.
+launch_consumed_brief() { # <literal>
+  case "$1" in
+    *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) return 0 ;;
+  esac
+  return 1
+}
+
 # A preflight pin refusal leaves the original agent running: no /exit, and the
 # brief and metadata bytes are unchanged.
 assert_pin_refusal_preserves_agent() {  # <case-dir> <id>
@@ -2456,8 +2465,8 @@ test_control_relaunch_preserves_original_base_after_later_commits() {
   assert_no_grep '## Allocation base' "$brief" \
     "source brief must stay free of the Allocation base overlay"
   # Stub harness launch argv must consume the launch-brief (delivered overlay).
-  assert_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
-    "stub harness launch must consume the launch-brief carrying the overlay"
+  launch_consumed_brief "$(cat "$dir/fake/literal")" \
+    || fail "stub harness launch must consume the launch-brief carrying the overlay"
   pass "fm-control relaunch: original base pin survives later commits; overlay delivered once"
 }
 
@@ -2475,8 +2484,8 @@ test_control_relaunch_legacy_absent_base_stays_unknown() {
   launch="$dir/home/data/rl51/launch-brief.md"
   [ "$(allocation_base_count "$launch")" = 0 ] \
     || fail "legacy unknown pin must omit the Allocation base overlay"
-  assert_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
-    "legacy relaunch must still deliver a launch-brief"
+  launch_consumed_brief "$(cat "$dir/fake/literal")" \
+    || fail "legacy relaunch must still deliver a launch-brief"
   pass "fm-control relaunch: truly absent legacy base stays unknown and omits overlay"
 }
 
@@ -2493,8 +2502,8 @@ test_control_relaunch_refuses_malformed_base_pins_before_mutation() {
   expect_code 1 "$rc" "empty-but-present base keys must refuse"$'\n'"$out"
   assert_contains "$out" "malformed allocation base pin" "empty keys should be named malformed"
   assert_pin_refusal_preserves_agent "$dir" audit-pin-order
-  assert_not_contains "$(cat "$dir/fake/literal")" "encode launch-brief" \
-    "malformed empty-key relaunch must not launch"
+  launch_consumed_brief "$(cat "$dir/fake/literal")" \
+    && fail "malformed empty-key relaunch must not launch"
 
   # requested_base-only.
   dir=$(new_case base-reqonly rl53)
