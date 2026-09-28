@@ -1,0 +1,18 @@
+lab=/var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T//fm-live-direct.yytKkp
+status=1
+before_cmd=zsh
+after_cmd=zsh
+output=fm-gate-refuse: gate agent lifecycle permitted only against lab home /var/folders/k7/pv977h6550z7pncjygnj7xn80000gn/T//fm-live-direct.yytKkp
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+error: relaunch of rl-live has a malformed allocation base pin in recorded meta; refusing
+brief_unchanged=yes
+meta_unchanged=yes
+launch_brief_created=no
+saw_expected_refusal=yes
+lab_removed=yes
