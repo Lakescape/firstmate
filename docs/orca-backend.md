@@ -43,6 +43,7 @@ worktree=<absolute Orca worktree path>
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
 Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
+Generic worker base-binding metadata for ship and scout tasks is not Orca-specific; `bin/fm-spawn.sh` owns the `base_sha`, `base_tree`, `base_cwd`, and optional `requested_base` fields it records after allocation.
 
 ## Current lifecycle and safety
 

@@ -75,13 +75,18 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
-3. **Record the note.**
+3. **Validate the worker allocation base pin.**
+   A ship or scout relaunch reads the recorded `base_sha`, `base_tree`, `base_cwd`, and optional `requested_base` before the checkpoint is journaled, before the progress note is written, and before the old agent is stopped.
+   Truly absent legacy bindings stay unknown, while malformed, partial, duplicate, non-commit, foreign-cwd, or mismatched pins refuse with the prior record and instructions untouched.
+   `bin/fm-base-pin-lib.sh` owns the exact validation and `bin/fm-spawn.sh --relaunch` repeats it before publishing the replacement.
+   A secondmate is outside worker base-binding and skips this step.
+4. **Record the note.**
    A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
    A secondmate relaunch does not require one and never rewrites its standing charter.
-4. **Stop the old agent** through the `exit` verb, with its postcondition.
-5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+5. **Stop the old agent** through the `exit` verb, with its postcondition.
+6. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
-6. **Preserve runtime-bound status authority where supported.**
+7. **Preserve runtime-bound status authority where supported.**
    The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
    This reference is a launch input, never authority to send, close, or act on the pane.
    [`docs/herdr-backend.md`](herdr-backend.md#agent-status-authority-and-relaunch) owns the mechanism and measured behavior.
