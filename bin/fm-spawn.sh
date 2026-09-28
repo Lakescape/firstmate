@@ -1701,6 +1701,10 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+SPAWN_BASE_SHA=
+SPAWN_BASE_TREE=
+SPAWN_BASE_CWD=
+SPAWN_REQUESTED_BASE=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1831,6 +1835,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID has no recorded project; refusing to relaunch" >&2
       exit 1
     }
+    fm_relaunch_load_allocation_base "$ID" "$RELAUNCH_META" "$RELAUNCH_WT" || exit 1
   fi
   if [ "$BACKEND" = herdr ]; then
     # fm-spawn uses HERDR_PANE_ID for the TASK's pane, while the herdr adapter
@@ -4324,15 +4329,10 @@ fi
 # - Relaunch: preserve the original allocation pin from recorded meta
 #   (bin/fm-base-pin-lib.sh). Never relabel later worker commits as the starting base.
 # - Secondmate: outside worker base-binding — leave unset / unwritten.
-SPAWN_BASE_SHA=
-SPAWN_BASE_TREE=
-SPAWN_BASE_CWD=
-SPAWN_REQUESTED_BASE=
 if [ "$KIND" = secondmate ]; then
   :
 elif [ "$RELAUNCH" -eq 1 ]; then
-  # Same owner fm-control.sh already ran before stopping the agent.
-  fm_relaunch_load_allocation_base "$ID" "$RELAUNCH_META" "$WT" || exit 1
+  :
 else
   SPAWN_BASE_SHA=$(git -C "$WT" rev-parse HEAD) || {
     echo "error: could not read HEAD SHA from spawn worktree '$WT' after base settle" >&2

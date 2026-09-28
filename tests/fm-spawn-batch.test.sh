@@ -145,16 +145,55 @@ test_scout_batch_refuses_delivery_flags() {
 
 # Two-child --base: every pair re-exec must carry the shared pin (Astra 010).
 test_batch_forwards_base_to_both_children() {
-  local trace pin
+  local fake_root child_log out status pin
   pin=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
-  trace=$(bash -x "$SPAWN" \
+  fake_root="$TMP_ROOT/fake-root"
+  child_log="$TMP_ROOT/batch-base-child.log"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+id=${1:-}
+base=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) base=${2:-}; shift 2 ;;
+    --base=*) base=${1#--base=}; shift ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$base" ]; then
+  printf 'child %s accepted base %s\n' "$id" "$base"
+  printf '%s\t%s\n' "$id" "$base" >> "$FM_CHILD_LOG"
+  exit 0
+fi
+printf 'child %s missing base\n' "$id" >&2
+exit 17
+SH
+  chmod +x "$fake_root/bin/fm-spawn.sh"
+
+  out=$(FM_ROOT_OVERRIDE="$fake_root" \
+    FM_HOME="$TMP_ROOT/batch-base-home" \
+    FM_STATE_OVERRIDE='' \
+    FM_DATA_OVERRIDE='' \
+    FM_PROJECTS_OVERRIDE='' \
+    FM_CONFIG_OVERRIDE='' \
+    FM_SPAWN_NO_GUARD=1 \
+    FM_CHILD_LOG="$child_log" \
+    "$SPAWN" \
     "batch-base-a-z21=projects/none-a" "batch-base-b-z22=projects/none-b" \
-    --scout --base "$pin" 2>&1) || true
-  printf '%s\n' "$trace" | grep -F -- "--base $pin" | grep -F 'batch-base-a-z21' >/dev/null \
-    || fail "batch did not forward --base to the first pair re-exec"$'\n'"$trace"
-  printf '%s\n' "$trace" | grep -F -- "--base $pin" | grep -F 'batch-base-b-z22' >/dev/null \
-    || fail "batch did not forward --base to the second pair re-exec"$'\n'"$trace"
-  pass "batch dispatch forwards --base to both child re-execs"
+    --scout --base "$pin" 2>&1)
+  status=$?
+  expect_code 0 "$status" "batch should succeed when both child spawns accept the shared base"$'\n'"$out"
+  assert_contains "$out" "child batch-base-a-z21 accepted base $pin" \
+    "first child did not observe the forwarded --base"
+  assert_contains "$out" "child batch-base-b-z22 accepted base $pin" \
+    "second child did not observe the forwarded --base"
+  assert_grep $'batch-base-a-z21\t'"$pin" "$child_log" \
+    "first child state did not record the forwarded --base"
+  assert_grep $'batch-base-b-z22\t'"$pin" "$child_log" \
+    "second child state did not record the forwarded --base"
+  pass "batch dispatch forwards --base to both child spawns"
 }
 
 # Unsupported --base on relaunch/secondmate must refuse before mutation.

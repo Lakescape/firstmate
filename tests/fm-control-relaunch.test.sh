@@ -2441,6 +2441,36 @@ assert_pin_refusal_preserves_agent() {  # <case-dir> <id>
     || fail "pin refusal for $id changed metadata"
 }
 
+test_direct_spawn_relaunch_refuses_malformed_base_before_publish() {
+  local dir out rc id literal
+  id=rl77
+  dir=$(new_case direct-spawn-pin "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'base_sha=\nbase_tree=\nbase_cwd=\n' >> "$dir/home/state/$id.meta"
+  cp -p "$dir/home/data/$id/brief.md" "$dir/brief.before"
+  cp -p "$dir/home/state/$id.meta" "$dir/meta.before"
+  rm -f "$dir/home/data/$id/launch-brief.md"
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+
+  rc=0
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude) || rc=$?
+  expect_code 1 "$rc" "direct fm-spawn --relaunch must refuse malformed base before publish"$'\n'"$out"
+  assert_contains "$out" "malformed allocation base pin" "malformed base should be named"
+  literal=$(cat "$dir/fake/literal")
+  assert_not_contains "$literal" "Firstmate operational input waiting" \
+    "direct malformed relaunch must not launch a replacement"
+  [ "$(cat "$dir/fake/command")" = zsh ] \
+    || fail "direct malformed relaunch changed the endpoint command to $(cat "$dir/fake/command")"
+  cmp -s "$dir/brief.before" "$dir/home/data/$id/brief.md" \
+    || fail "direct malformed relaunch changed the source brief"
+  cmp -s "$dir/meta.before" "$dir/home/state/$id.meta" \
+    || fail "direct malformed relaunch changed metadata"
+  [ ! -e "$dir/home/data/$id/launch-brief.md" ] \
+    || fail "direct malformed relaunch published launch-brief before refusing"
+  pass "direct fm-spawn --relaunch refuses malformed base before publish"
+}
+
 test_control_relaunch_preserves_original_base_after_later_commits() {
   local dir out rc=0 pin brief launch
   dir=$(new_case base-preserve rl50)
@@ -2707,6 +2737,7 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_direct_spawn_relaunch_refuses_malformed_base_before_publish
 test_control_relaunch_preserves_original_base_after_later_commits
 test_control_relaunch_legacy_absent_base_stays_unknown
 test_control_relaunch_refuses_malformed_base_pins_before_mutation
