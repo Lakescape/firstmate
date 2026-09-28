@@ -805,7 +805,7 @@ assert_warning_responses_land_on_sends() {  # <log> <resp-dir> <code>
 
 # One warning variant, aligned to the send calls inside peek + inbox ring + crew-state.
 # Call order: peek read, composer read, literal doorbell send, Enter send,
-# composer read, crew-state read.
+# composer read, crew-state presence read, crew-state tail read.
 run_orca_inbox_warning_variant() {  # <code> <message> <task-id> <case-name>
   local code=$1 message=$2 id=$3 case_name=$4
   local wt state out neutral record body status inbox_count
@@ -823,6 +823,7 @@ run_orca_inbox_warning_variant() {  # <code> <message> <task-id> <case-name>
   orca_send_warning_json "$code" "$message" > "$RESP/4.out"
   printf '{"ok":true,"result":{"terminal":{"tail":["╭───╮","│ > │","╰───╯"]}}}\n' > "$RESP/5.out"
   printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/7.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
