@@ -1,9 +1,12 @@
 """Confined filesystem operations. All traversal uses anchored no-follow dir fds."""
 import hashlib
+import importlib.util
 import json
 import os
 import stat
 import sys
+import uuid
+from pathlib import Path
 if __name__ == '__main__' and sys.platform == 'linux':
     import ctypes
     # A fixed helper never survives the worker that owns it.
@@ -19,7 +22,10 @@ def protected(name):
 
 
 def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
+    spec = importlib.util.spec_from_file_location('fm_confined_canonical', Path(__file__).with_name('controller.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return hashlib.sha256(module.canonical(value)).hexdigest()
 
 
 def parts(path):
@@ -88,30 +94,51 @@ def preview(root, args):
         os.close(fd)
 
 
-def execute(root, args, expected=None):
+def execute(root, args, expected=None, write_fn=None):
     evidence, data = preview(root, args)
     if args['operation'] == 'read':
         return data.decode('utf-8', 'replace')
     if evidence != expected:
         raise ValueError('approval_target_changed')
     fd, name = parent(root, args['path'])
+    staged = '.fm-write-' + str(uuid.uuid4())
     try:
-        if evidence['fingerprint'] == 'missing':
-            file_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
-        else:
-            file_fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        file_fd = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         try:
-            if evidence['fingerprint'] != 'missing':
-                _, actual = snapshot(file_fd)
-                if actual != evidence['fingerprint']:
-                    raise ValueError('approval_target_changed')
-            os.lseek(file_fd, 0, os.SEEK_SET)
-            os.ftruncate(file_fd, 0)
-            os.write(file_fd, data)
+            offset = 0
+            for _ in range(128):
+                if offset == len(data):
+                    break
+                written = (write_fn or os.write)(file_fd, data[offset:])
+                if type(written) is not int or not 0 < written <= len(data)-offset:
+                    raise ValueError('staged_write_no_progress')
+                offset += written
+            if offset != len(data):
+                raise ValueError('staged_write_limit')
             os.fsync(file_fd)
+            os.lseek(file_fd, 0, os.SEEK_SET)
+            if snapshot(file_fd)[0] != data:
+                raise ValueError('staged_content_changed')
+            if evidence['fingerprint'] == 'missing':
+                os.link(staged, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            else:
+                target_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                try:
+                    _, actual = snapshot(target_fd)
+                    if actual != evidence['fingerprint']:
+                        raise ValueError('approval_target_changed')
+                    os.fchmod(file_fd, os.fstat(target_fd).st_mode & 0o777)
+                finally:
+                    os.close(target_fd)
+                os.replace(staged, name, src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
         finally:
             os.close(file_fd)
     finally:
+        try:
+            os.unlink(staged, dir_fd=fd)
+        except FileNotFoundError:
+            pass
         os.close(fd)
     return 'mutation_applied'
 

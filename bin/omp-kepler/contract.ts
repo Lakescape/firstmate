@@ -14,9 +14,34 @@ export interface Capsule {
   sourceHashes: Record<string, string>; credentialFile: string;
 }
 export function canonical(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) throw Error("finite_safe_number_required");
+    if (value === 0) return "0";
+    const bytes = new DataView(new ArrayBuffer(8)); bytes.setFloat64(0, Math.abs(value));
+    const bits = bytes.getBigUint64(0), exponent = Number((bits >> 52n) & 2047n);
+    let numerator = (bits & ((1n << 52n) - 1n)) + (exponent ? 1n << 52n : 0n);
+    let power = (exponent ? exponent - 1023 : -1022) - 52;
+    while (power < 0 && numerator % 2n === 0n) { numerator /= 2n; power++; }
+    const sign = value < 0 ? "-" : "";
+    if (power >= 0) return sign + (numerator << BigInt(power)).toString();
+    const places = -power, digits = (numerator * 5n ** BigInt(places)).toString().padStart(places + 1, "0");
+    return sign + `${digits.slice(0, -places)}.${digits.slice(-places)}`.replace(/0+$/, "").replace(/\.$/, "");
+  }
+  if (typeof value === "string") {
+    for (let i = 0; i < value.length; i++) {
+      const unit = value.charCodeAt(i);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = value.charCodeAt(++i);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) throw Error("valid_unicode_required");
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) throw Error("valid_unicode_required");
+    }
+    return JSON.stringify(value);
+  }
+  if (value === null || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value !== "object") throw Error("supported_json_value_required");
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  return `{${Object.keys(value).filter(k => (value as Record<string, unknown>)[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`).join(",")}}`;
+  if (![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw Error("supported_json_value_required");
+  return `{${Object.keys(value).filter(k => (value as Record<string, unknown>)[k] !== undefined).sort().map(k => `${canonical(k)}:${canonical((value as Record<string, unknown>)[k])}`).join(",")}}`;
 }
 export const digest = (value: unknown): string => createHash("sha256").update(canonical(value)).digest("hex");
 export function validateGate(c: Capsule, now = Date.now() / 1000): void {

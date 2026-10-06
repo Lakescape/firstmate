@@ -26,6 +26,9 @@ The owner signing key belongs to an authenticated FM control broker outside the 
 An editable key, a same-user queue token, or a caller boolean cannot establish captain approval.
 Use the entrypoint's template output to prepare the host record and an immutable signed capsule for the assigned canonical worktree and exact Git head.
 Bind all producer source hashes and the complete private runtime tree digest to both records.
+Signature and digest serialization uses sorted UTF-16 object keys, valid Unicode strings, and exact binary64 decimal numbers without exponent notation.
+Negative zero serializes as zero; nonfinite numbers, unpaired surrogates, and numbers outside plus or minus 9,007,199,254,740,991 refuse.
+This serialization is shared by the Python producer and TypeScript verifier and preserves finite fractional model costs and receipt timestamps.
 The SDK runtime is private Bun 1.4.0 plus the complete SDK 18.1.11 dependency tree; a monolithic OMP CLI executable does not provide this SDK.
 The controller's `tree_digest` function owns dependency-tree serialization.
 The host requires Linux, `/usr/bin/python3`, `/usr/bin/openssl` with Ed25519 `pkeyutl`, Git, and a working Unix socket directory.
@@ -36,6 +39,10 @@ Provision that account, its private credential/state directories, worktree acces
 The owner console and root-only signing key remain under distinct root custody; the worker account receives no sudo access, signing-key access, or owner-console authority.
 A root-launched worker could read a root-owned key, so direct root worker execution is refused.
 No account, ownership, sudo, or host configuration is changed by this preparation.
+Place the fresh bootstrap beneath a canonical neutral state root outside every enclosing VCS repository and ambient configuration or instruction directory.
+Before operational imports, the controller's authority validator refuses enclosing Git/Hg/SVN/JJ markers, native agent configuration directories, settings files, environment files, and WATCHDOG/AGENTS/CLAUDE instructions.
+It also refuses startup sources in the explicit bootstrap agent/config directories; post-start private auth/model database files do not grant discovery authority.
+The guard prevents SDK startup scans and `@import` expansion from inheriting another repository's instructions.
 
 The supported credential file contains one opaque access credential for the exact approved provider and account, without surrounding JSON.
 It is private to the launch account, outside the worktree, and passed through an inherited file descriptor.
@@ -61,6 +68,7 @@ The approval-only UI publishes `<nonce>.request.json` beneath the task's `approv
 The authenticated external FM broker responds with `<nonce>.receipt.json`, an Ed25519 envelope over the unchanged request fields plus `decision: approve` or `decision: deny`.
 The worker verifies the fixed owner public key, exact binding, expiry, and single use before allowing the native approval gate and rechecks the target before writing.
 Invalid or missing responses deny the mutation.
+Writes stage and verify the complete content before rechecking the approved target fingerprint and replacing it; short, zero-progress, or failed staged writes preserve the target.
 The prepared owner-only producer can sign and publish a reviewed capsule, approve or deny an exact pending mutation, and publish externally verified credit evidence.
 Its fixed root-only owner key must be enrolled through the authenticated owner control channel; neither the worker account nor an arbitrary sudo caller is treated as captain identity.
 The producer never queries a provider or creates a signing key.
@@ -82,6 +90,8 @@ An authenticated worker result with a successful assistant stop is retained sepa
 Public status excludes the interrupt capability.
 Reconnect reads the receipt without submitting a prompt; interrupt reports request acceptance and separately verifies the owned worker stopped.
 A quiet Terminal or successful process exit without a terminal agent receipt is failure.
+Malformed worker receipts and exceptional watchdog cleanup retain a failed, exited, and reaped classification when the owned receipt is still available.
+Unexpected-stop recovery is pinned to `none`, alongside disabled retry and advisor behavior.
 Process-group confinement does not cover a hostile descendant creating a new session, and the adapter is not a general OS sandbox.
 
 Run the [portable behavior suite](../tests/fm-omp-kepler.test.sh) with a pinned private Bun to exercise real inert children, the filesystem boundary, cryptographic fixture receipts, and an injected fake SDK.

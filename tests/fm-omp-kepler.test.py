@@ -71,6 +71,40 @@ class Filesystem(unittest.TestCase):
         finally:
             outside.unlink()
 
+    def test_staged_short_zero_and_failing_writes_preserve_target(self):
+        args = {'operation': 'write', 'path': 'a.txt', 'content': 'complete replacement'}
+        original = (self.root / 'a.txt').read_bytes()
+        expected = boundary.preview(str(self.root), args)[0]
+        with self.assertRaises(ValueError):
+            boundary.execute(str(self.root), args, expected, lambda fd, data: 0)
+        self.assertEqual((self.root / 'a.txt').read_bytes(), original)
+        calls = [0]
+        def failing(fd, data):
+            calls[0] += 1
+            if calls[0] == 2:
+                raise OSError('inert_write_failure')
+            return os.write(fd, data[:2])
+        with self.assertRaises(OSError):
+            boundary.execute(str(self.root), args, expected, failing)
+        self.assertEqual((self.root / 'a.txt').read_bytes(), original)
+        with self.assertRaises(ValueError):
+            boundary.execute(str(self.root), args, expected, lambda fd, data: len(data))
+        self.assertEqual((self.root / 'a.txt').read_bytes(), original)
+        boundary.execute(str(self.root), args, expected, lambda fd, data: os.write(fd, data[:2]))
+        self.assertEqual((self.root / 'a.txt').read_text(), args['content'])
+        self.assertFalse(any(p.name.startswith('.fm-write-') for p in self.root.iterdir()))
+        expected = boundary.preview(str(self.root), args)[0]
+        def changed_target(fd, data):
+            (self.root / 'a.txt').write_text('foreign fixture change')
+            return os.write(fd, data)
+        with self.assertRaises(ValueError):
+            boundary.execute(str(self.root), args, expected, changed_target)
+        self.assertEqual((self.root / 'a.txt').read_text(), 'foreign fixture change')
+        missing = {'operation': 'write', 'path': 'missing.txt', 'content': 'complete'}
+        with self.assertRaises(ValueError):
+            boundary.execute(str(self.root), missing, boundary.preview(str(self.root), missing)[0], lambda fd, data: 0)
+        self.assertFalse((self.root / 'missing.txt').exists())
+
 
 class Lifecycle(unittest.TestCase):
     def setUp(self):
@@ -117,6 +151,36 @@ class Lifecycle(unittest.TestCase):
         record = self.run_child('print(\'{"type":"agent_end","willContinue":false}\',flush=True)\nimport time;time.sleep(2)\n')
         self.assertEqual(record['state'], 'invalid-receipt')
         self.assertTrue(record['reaped'])
+
+    def test_malformed_receipts_are_durably_failed_and_reaped(self):
+        for index, event in enumerate(([], None, 4, 'scalar', {}, {'type': []}, {'type': 'unknown'})):
+            with self.subTest(event=event):
+                self.root.joinpath('state').mkdir(exist_ok=True)
+                record = self.run_child(f'print({json.dumps(json.dumps(event))},flush=True)\nimport time;time.sleep(2)\n')
+                self.assertEqual(record['state'], 'invalid-receipt')
+                durable = json.loads((self.root / 'state/receipt.json').read_text())
+                self.assertTrue(durable['reaped'])
+                self.assertIsNotNone(durable['exitCode'])
+                (self.root / 'state/receipt.json').unlink()
+
+    def test_exceptional_watchdog_finalizes_failed_receipt(self):
+        original = controller.owned_atomic
+        calls = [0]
+        def fault(path, value):
+            calls[0] += 1
+            if calls[0] == 2:
+                raise RuntimeError('inert_marker_fault')
+            return original(path, value)
+        controller.owned_atomic = fault
+        try:
+            with self.assertRaises(RuntimeError):
+                controller._supervise(['/bin/sleep', '2'], self.root / 'state', time.time()+2, controller.clean_env(self.home))
+        finally:
+            controller.owned_atomic = original
+        durable = json.loads((self.root / 'state/receipt.json').read_text())
+        self.assertEqual(durable['state'], 'failed')
+        self.assertTrue(durable['reaped'])
+        self.assertIsNone(controller.identity(durable['pid']))
 
     def test_expiry_kills_stalled_event_loop_and_descendants(self):
         child_pid = self.root / 'descendant.pid'
@@ -209,6 +273,42 @@ class Lifecycle(unittest.TestCase):
 
 
 class Entry(unittest.TestCase):
+    def test_neutral_discovery_refuses_another_repo_and_ambient_sources(self):
+        with tempfile.TemporaryDirectory(prefix='fm-omp-ancestry-') as directory:
+            root = Path(directory).resolve()
+            bootstrap = root / 'state/task/bootstrap'
+            bootstrap.mkdir(parents=True)
+            controller.neutral_discovery_root(bootstrap)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            (root / 'WATCHDOG.md').write_text('@import outside-secret-fixture')
+            (root / 'WATCHDOG.yml').write_text('instructions: "@import outside-secret-fixture"')
+            (root / '.omp').mkdir()
+            (root / '.omp/settings.yml').write_text('extensions: [hostile-fixture]')
+            with self.assertRaisesRegex(ValueError, 'ambient_startup_discovery_refused'):
+                controller.neutral_discovery_root(bootstrap)
+            assigned = root.parent / (root.name + '-assigned')
+            assigned.mkdir()
+            try:
+                capsule = {'version': 1, 'task': 'ATX-2170', 'issue': 'ATX-2170', 'scope': 'command-center-pilot',
+                           'role': 'scout', 'backend': 'orca', 'cockpit': 'kepler', 'launchSurface': 'manual-terminal',
+                           'supervisor': 'firstmate', 'keplerTaskId': None, 'keplerWorktreeId': None,
+                           'tools': ['read', 'grep'], 'authority': 'owner-approved-activation', 'ownerAction': 'ATX-1758-approved',
+                           'gates': {'provider': True, 'installation': False, 'login': False, 'merge': False, 'production': False},
+                           'issuedAt': 100, 'deadline': 200, 'credit': {'included': True, 'overage': 0, 'validUntil': 200},
+                           'model': {'provider': 'fixture', 'id': 'fixture', 'api': 'fixture', 'baseUrl': 'https://example.invalid'},
+                           'fallback': False, 'brief': 'inert', 'worktree': str(assigned)}
+                host = {'issue': 'ATX-2170', 'scope': 'command-center-pilot', 'task': 'ATX-2170',
+                        'allowedWorktrees': [str(assigned)], 'stateRoot': str(root / 'state')}
+                with self.assertRaisesRegex(ValueError, 'ambient_startup_discovery_refused'):
+                    controller.validate(capsule, host, 'ATX-2170', 101)
+            finally:
+                assigned.rmdir()
+
+    def test_finite_safe_canonical_boundaries(self):
+        self.assertEqual(controller.canonical([1.0, -0.0]), b'[1,0]')
+        for bad in (float('nan'), float('inf'), 2**53, '\ud800', {'\udfff': 1}):
+            with self.assertRaises((ValueError, UnicodeError)):
+                controller.canonical(bad)
     def test_registration_is_fixed_and_does_not_install(self):
         result = subprocess.run(['/bin/bash', str(ROOT / 'bin/fm-omp-kepler.sh'), 'registration', 'ATX-2170'], stdout=subprocess.PIPE, check=True)
         record = json.loads(result.stdout)

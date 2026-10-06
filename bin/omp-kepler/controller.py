@@ -11,6 +11,7 @@ worker-readable files. The root-owned public key is verification material.
 """
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -35,7 +36,60 @@ def sha(path):
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+    """Finite safe binary64 numbers use their exact non-exponent decimal value.
+
+    Strings are valid Unicode; keys sort by UTF-16 units in both languages.
+    Negative zero is zero. Values outside +/- (2**53-1) are unsupported.
+    """
+    def encode(item):
+        if item is None:
+            return 'null'
+        if type(item) is bool:
+            return 'true' if item else 'false'
+        if type(item) in (int, float):
+            if abs(item) > 2**53-1 or not math.isfinite(item):
+                raise ValueError('finite_safe_number_required')
+            numerator, denominator = float(item).as_integer_ratio()
+            if denominator == 1:
+                return str(numerator)
+            places = denominator.bit_length()-1
+            digits = str(abs(numerator) * 5**places).rjust(places+1, '0')
+            return ('-' if numerator < 0 else '') + (digits[:-places] + '.' + digits[-places:]).rstrip('0').rstrip('.')
+        if isinstance(item, str):
+            item.encode('utf-8')  # Reject unpaired surrogates.
+            return json.dumps(item, ensure_ascii=False)
+        if type(item) is list:
+            return '[' + ','.join(encode(v) for v in item) + ']'
+        if type(item) is dict and all(isinstance(k, str) for k in item):
+            keys = sorted(item, key=lambda k: k.encode('utf-16-be'))
+            return '{' + ','.join(encode(k) + ':' + encode(item[k]) for k in keys) + '}'
+        raise ValueError('supported_json_value_required')
+    return encode(value).encode('utf-8')
+
+
+def neutral_discovery_root(bootstrap):
+    """Refuse ambient SDK18.1.11 startup sources before any SDK import."""
+    bootstrap = Path(bootstrap)
+    if bootstrap.resolve() != bootstrap:
+        raise ValueError('canonical_neutral_bootstrap_required')
+    for directory in (bootstrap, *bootstrap.parents):
+        if directory.is_dir() and any(directory.glob('.env*')):
+            raise ValueError('ambient_startup_discovery_refused')
+        if all(os.path.lexists(directory / name) for name in ('HEAD', 'objects', 'refs')):
+            raise ValueError('ambient_startup_discovery_refused')
+        for name in ('.git', '.hg', '.svn', '.jj', '.omp', '.pi', '.claude', '.codex',
+                     '.env', '.env.local', 'WATCHDOG.md', 'WATCHDOG.yml', 'WATCHDOG.yaml',
+                     'AGENTS.md', 'CLAUDE.md', 'settings.json', 'settings.yml', 'settings.yaml', 'config.yml', 'config.yaml'):
+            if os.path.lexists(directory / name):
+                raise ValueError('ambient_startup_discovery_refused')
+    for child in ('agent', 'config'):
+        directory = bootstrap / child
+        if directory.is_symlink():
+            raise ValueError('canonical_neutral_bootstrap_required')
+        for name in ('WATCHDOG.md', 'WATCHDOG.yml', 'WATCHDOG.yaml', 'AGENTS.md', 'CLAUDE.md',
+                     'settings.json', 'settings.yml', 'settings.yaml', 'config.yml', 'config.yaml', '.env'):
+            if os.path.lexists(directory / name):
+                raise ValueError('ambient_startup_discovery_refused')
 
 
 def owned_host(path):
@@ -153,6 +207,7 @@ def validate(c, host, task, now=None):
     state = Path(host['stateRoot']) / task
     if state.resolve() == worktree or worktree in state.resolve().parents or state.resolve() in worktree.parents:
         raise ValueError('paths_not_separate')
+    neutral_discovery_root(state.resolve() / 'bootstrap')
     head = subprocess.run(['git', '-C', str(worktree), 'rev-parse', 'HEAD'], check=True,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5).stdout.decode().strip()
     top = subprocess.run(['git', '-C', str(worktree), 'rev-parse', '--show-toplevel'], check=True,
@@ -281,8 +336,11 @@ def supervise(command, state, deadline, env, payload=None, pass_fds=(), lease=No
 
 def _supervise(command, state, deadline, env, payload=None, pass_fds=(), parent=None, lease=None):
     resources = {}
+    completed = False
     try:
-        return _supervise_owned(command, state, deadline, env, payload, pass_fds, parent, lease, resources)
+        result = _supervise_owned(command, state, deadline, env, payload, pass_fds, parent, lease, resources)
+        completed = True
+        return result
     finally:
         child = resources.get('child')
         if child and child.poll() is None:
@@ -291,6 +349,11 @@ def _supervise(command, state, deadline, env, payload=None, pass_fds=(), parent=
                 child.wait(timeout=2)
             except ProcessLookupError:
                 pass
+        record = resources.get('record')
+        marker = Path(state) / 'receipt.json'
+        if not completed and child and record and (not marker.exists() or marker_owner(marker) == resources.get('owner')):
+            record.update(state='failed', event='watchdog_exception', reaped=child.poll() is not None, exitCode=child.poll())
+            owned_atomic(marker, record)
         if child:
             if child.stdout:
                 child.stdout.close()
@@ -349,6 +412,7 @@ def _supervise_owned(command, state, deadline, env, payload=None, pass_fds=(), p
                       sourceHead=capsule['head'], worktree=capsule['worktree'], cockpit=capsule['cockpit'],
                       keplerTaskId=capsule['keplerTaskId'], keplerWorktreeId=capsule['keplerWorktreeId'])
     record['identityStrength'] = 'linux-boot-startticks' if sys.platform == 'linux' else 'portable-ps-weak'
+    resources['record'] = record
     owned_atomic(marker, record)
     selector = selectors.DefaultSelector()
     selector.register(server, selectors.EVENT_READ, 'control')
@@ -430,6 +494,10 @@ def _supervise_owned(command, state, deadline, env, payload=None, pass_fds=(), p
                         line, buffer = buffer.split(b'\n', 1)
                         try:
                             event = json.loads(line)
+                            allowed = {'agent_start': {'type'}, 'agent_end': {'type', 'isTerminal'},
+                                       'worker_failure': {'type'}, 'worker_result': {'type', 'task', 'stopReason', 'text', 'truncated'}}
+                            if not isinstance(event, dict) or not isinstance(event.get('type'), str) or event['type'] not in allowed or set(event) - allowed[event['type']]:
+                                raise ValueError('invalid_receipt_object')
                             if event.get('type') == 'agent_start' and not stopping:
                                 record.update(state='busy', event='agent_start')
                             elif event.get('type') == 'agent_end' and not stopping:
@@ -464,10 +532,16 @@ def _supervise_owned(command, state, deadline, env, payload=None, pass_fds=(), p
             record['state'] = 'completed' if rc == 0 and record['terminalReceipt'] and record['resultReceipt'] else 'failed'
         owned_atomic(marker, record)
         return record
+    except BaseException:
+        record.update(state='failed', event='watchdog_exception')
+        raise
     finally:
         if child.poll() is None and identity(child.pid) == start:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait(timeout=2)
+        if marker.exists() and marker_owner(marker) == owner:
+            record.update(reaped=child.poll() is not None, exitCode=child.poll())
+            owned_atomic(marker, record)
         selector.close()
         server.close()
         for s, handler in previous.items():

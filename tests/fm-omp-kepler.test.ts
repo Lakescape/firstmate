@@ -1,6 +1,7 @@
 // Fake SDK boundary and real confined filesystem behavior; no SDK runtime imports.
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, sign, verify } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,7 @@ import { createConfinedTools, fileOperation } from "../bin/omp-kepler/tools";
 import { options, PINNED, runApproved } from "../bin/omp-kepler/worker";
 
 let checks = 0;
+let nativeInteropSigned = 0;
 const check = (fn: () => void): void => { fn(); checks++; };
 const now = Math.floor(Date.now() / 1000);
 const root = realpathSync(mkdtempSync(join(tmpdir(), "fm-omp-fake-")));
@@ -26,6 +28,25 @@ const {publicKey, privateKey} = generateKeyPairSync("ed25519");
 const key = publicKey.export({type: "spki", format: "pem"}).toString();
 const signature = (payload: ApprovalReceipt) => ({payload, signature: sign(null, Buffer.from(canonical(payload)), privateKey).toString("base64")});
 try {
+  const fixtureKey = join(root, "fixture.key");
+  writeFileSync(fixtureKey, privateKey.export({type: "pkcs8", format: "pem"}), {mode: 0o600});
+  const pythonRecord = (payload: unknown): {body: string; hash: string; envelope: {payload: unknown; signature: string} | null} => {
+    const fixture = join(root, "interop.json"); writeFileSync(fixture, JSON.stringify(payload));
+    const code = `import importlib.util,json,hashlib,subprocess,sys\ns=importlib.util.spec_from_file_location('producer',sys.argv[3]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\np=json.load(open(sys.argv[1]));b=m.controller.canonical(p)\nv=subprocess.run(['/usr/bin/openssl','version'],stdout=subprocess.PIPE,check=True).stdout\ne=m.sign_record(p,sys.argv[2]) if v.startswith(b'OpenSSL 3') else None\nprint(json.dumps({'body':b.decode(),'hash':hashlib.sha256(b).hexdigest(),'envelope':e}))`;
+    const result = spawnSync("/usr/bin/python3", ["-I", "-c", code, fixture, fixtureKey, join(import.meta.dir, "../bin/omp-kepler/record_signer.py")], {encoding: "utf8", timeout: 5000});
+    assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout);
+  };
+  for (const payload of [
+    {...c, model: {...model, cost: {input: 0.1, output: 1.0, cacheRead: 1e-7, cacheWrite: -0}}, unicode: {"\ue000": "é\\\"\n", "😀": "𐀀"}},
+    {numbers: [1.0, -0, 1e-7, 1e-5, 0.1, Number.MIN_VALUE, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER]},
+  ]) {
+    const produced = pythonRecord(payload);
+    check(() => assert.equal(produced.body, canonical(payload)));
+    check(() => assert.equal(produced.hash, digest(payload)));
+    if (produced.envelope) { check(() => assert.equal(verify(null, Buffer.from(canonical(produced.envelope!.payload)), key, Buffer.from(produced.envelope!.signature, "base64")), true)); nativeInteropSigned++; }
+  }
+  for (const bad of [NaN, Infinity, 2 ** 53, "\ud800", {"\udfff": 1}]) check(() => assert.throws(() => canonical(bad)));
+  check(() => assert.equal(PINNED["features.unexpectedStopDetection"], "none"));
   check(() => validateGate(c));
   const failures: Array<(copy: Capsule) => void> = [
     v => { v.authority = "implementation-only"; }, v => { v.ownerAction = "ATX1758 OWNER ACTION PENDING"; }, v => { v.issue = "OTHER" as never; },
@@ -54,6 +75,12 @@ try {
   const credit: CreditReceipt = {version: 1, kind: "verified-provider-credit", task: c.task, capsuleHash: digest(c), provider: model.provider,
     modelId: model.id, accountEvidenceRef: "inert-account-fixture", usageEvidenceRef: "inert-usage-fixture", included: true, overage: 0, observedAt: now, validUntil: c.deadline};
   const signedCredit = (p: CreditReceipt) => ({payload: p, signature: sign(null, Buffer.from(canonical(p)), privateKey).toString("base64")});
+  const producedCredit = pythonRecord({...credit, observedAt: now - 0.125});
+  check(() => assert.equal(producedCredit.body, canonical({...credit, observedAt: now - 0.125})));
+  if (producedCredit.envelope) {
+    check(() => verifyCredit(producedCredit.envelope as {payload: CreditReceipt; signature: string}, c, digest(c), key, now));
+    nativeInteropSigned++;
+  }
   check(() => verifyCredit(signedCredit(credit), c, digest(c), key, now));
   check(() => assert.throws(() => verifyCredit(signedCredit(credit), c, digest(c), key, now + 61)));
   check(() => assert.throws(() => verifyCredit(signedCredit({...credit, provider: "foreign"}), c, digest(c), key, now)));
@@ -78,6 +105,14 @@ try {
   const request = JSON.parse(approval.reason.slice("FM_MUTATION ".length));
   check(() => assert.equal(request.preview.path, join(root, "file.txt")));
   check(() => assert.equal(request.preview.argsDigest, digest({...args, operation: "write"})));
+  const interopBroker = new ApprovalBroker(c, digest(c), key, () => now + 0.125);
+  const interopRequest = interopBroker.request("write", request.preview, request.arguments);
+  const producedApproval = pythonRecord({...interopRequest, decision: "approve"});
+  check(() => assert.equal(producedApproval.body, canonical({...interopRequest, decision: "approve"})));
+  if (producedApproval.envelope) {
+    check(() => assert.equal(interopBroker.consume(producedApproval.envelope as {payload: ApprovalReceipt; signature: string}), true));
+    nativeInteropSigned++;
+  }
   await assert.rejects(write.execute("write-before-owner", args, undefined, {} as CustomToolContext)); checks++;
   const receipt: ApprovalReceipt = {...request, decision: "approve"};
   check(() => assert.throws(() => broker.consume({...signature(receipt), signature: "wrong"})));
@@ -134,5 +169,6 @@ try {
   await assert.rejects(runApproved(c, input, async () => hangingCleanup, async () => {}, () => {}), /worker_cleanup_timeout/); checks++;
   const failedAssistant = {...fake, session: {...fake.session, getLastAssistantMessage: () => ({stopReason: "error"})}} as unknown as CreateAgentSessionResult;
   await assert.rejects(runApproved(c, input, async () => failedAssistant, async () => {}, () => {}), /successful_assistant_stop_required/); checks++;
-  console.log(JSON.stringify({classification: "fake-sdk-and-confined-tools-only", checks, actualSdkSessions: 0, providerCalls: 0}));
+  console.log(JSON.stringify({classification: "fake-sdk-and-confined-tools-only", checks, nativeInteropSigned,
+    nativeInteropCapability: nativeInteropSigned ? "passed" : "skipped-native-openssl-3-required", actualSdkSessions: 0, providerCalls: 0}));
 } finally { rmSync(root, {recursive: true, force: true}); }

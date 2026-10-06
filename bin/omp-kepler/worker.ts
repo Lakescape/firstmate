@@ -20,6 +20,7 @@ export const PINNED = {
   "autolearn.enabled": false, "memory.backend": "off", extensions: [], "prewalk.enabled": false,
   "goal.enabled": false, "goal.continuationModes": [], externalThinking: false, "async.enabled": false,
   "startup.checkUpdate": false, "marketplace.autoUpdate": "off", includeWorkspaceTree: false,
+  "features.unexpectedStopDetection": "none",
 } satisfies NonNullable<SettingsOptions["overrides"]>;
 
 export function assertSettings(settings: Settings): void {
