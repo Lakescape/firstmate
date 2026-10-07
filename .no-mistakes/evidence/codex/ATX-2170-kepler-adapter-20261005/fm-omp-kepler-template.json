@@ -1,0 +1,76 @@
+{
+  "host": {
+    "issue": "ATX-2170",
+    "scope": "command-center-pilot",
+    "task": "ATX-2170",
+    "workerAccount": {
+      "name": "fm-omp-worker",
+      "uid": "<verified-nonzero-uid>",
+      "gid": "<verified-nonzero-gid>"
+    },
+    "allowedWorktrees": [
+      "<canonical-command-center-pilot-worktree>"
+    ],
+    "ownerPublicKey": "/etc/firstmate/omp-kepler/owner.pub",
+    "ownerPublicKeySha256": "<sha256>",
+    "stateRoot": "<absolute-task-state-root-outside-worktrees>",
+    "capsuleRoot": "<absolute-FM-capsule-root>",
+    "runtime": {
+      "bun": "<absolute-private-bun>",
+      "bunVersion": "1.4.0",
+      "bunSha256": "<sha256>",
+      "sdkVersion": "18.1.11",
+      "nodeModules": "<absolute-private-node_modules>",
+      "nodeModulesSha256": "<tree_digest>"
+    },
+    "sourceHashes": "<producer-file-name-to-sha256-map>"
+  },
+  "capsule": {
+    "version": 1,
+    "task": "ATX-2170",
+    "issue": "ATX-2170",
+    "scope": "command-center-pilot",
+    "role": "scout",
+    "backend": "orca",
+    "cockpit": "kepler",
+    "launchSurface": "manual-terminal",
+    "supervisor": "firstmate",
+    "keplerTaskId": null,
+    "keplerWorktreeId": null,
+    "authority": "implementation-only",
+    "ownerAction": "ATX1758 OWNER ACTION PENDING",
+    "gates": {
+      "provider": false,
+      "installation": false,
+      "login": false,
+      "merge": false,
+      "production": false
+    },
+    "worktree": "<canonical-assigned-worktree>",
+    "head": "<40-character-head>",
+    "brief": "<approved-brief>",
+    "issuedAt": 0,
+    "deadline": 0,
+    "credit": {
+      "included": false,
+      "overage": 0,
+      "validUntil": 0
+    },
+    "fallback": false,
+    "tools": [
+      "read",
+      "grep"
+    ],
+    "model": "<complete-owner-selected-Model-metadata>",
+    "runtime": {
+      "bun": "<absolute-private-bun>",
+      "bunVersion": "1.4.0",
+      "bunSha256": "<sha256>",
+      "sdkVersion": "18.1.11",
+      "nodeModules": "<absolute-private-node_modules>",
+      "nodeModulesSha256": "<tree_digest>"
+    },
+    "sourceHashes": "<producer-file-name-to-sha256-map>",
+    "credentialFile": "<private-opaque-access-credential-file-outside-worktrees>"
+  }
+}

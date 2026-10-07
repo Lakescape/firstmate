@@ -1,0 +1,4 @@
+command: /bin/bash bin/fm-omp-kepler.sh launch ATX-2170
+exit: 1
+stdout_bytes: 0
+stderr: {"error": "host_custody_required"}

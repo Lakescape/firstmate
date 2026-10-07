@@ -1,0 +1,33 @@
+test_default_launch_refuses_without_trusted_host (__main__.Entry) ... ok
+test_filesystem_boundary_refuses_mutable_helper_overlap (__main__.Entry) ... ok
+test_finite_safe_canonical_boundaries (__main__.Entry) ... ok
+test_fixed_root_handoff_cannot_choose_account_or_command (__main__.Entry) ... ok
+test_neutral_discovery_refuses_another_repo_and_ambient_sources (__main__.Entry) ... ok
+test_registration_is_fixed_and_does_not_install (__main__.Entry) ... ok
+test_validate_rejects_mutable_adapter_source_overlap (__main__.Entry) ... ok
+test_validate_rejects_relative_host_paths_before_effects (__main__.Entry) ... ok
+test_validate_uses_fixed_git_and_sanitized_environment (__main__.Entry) ... ok
+test_confined_mutations_and_changed_target (__main__.Filesystem) ... ok
+test_paths_symlinks_links_fifo_and_bounds (__main__.Filesystem) ... ok
+test_staged_short_zero_and_failing_writes_preserve_target (__main__.Filesystem) ... ok
+test_continuation_terminal_and_reaped (__main__.Lifecycle) ... ok
+test_controller_sigkill_independent_watchdog_reaps (__main__.Lifecycle) ... ok
+test_cross_task_worktree_lease_and_failure_cleanup (__main__.Lifecycle) ... ok
+test_exceptional_watchdog_finalizes_failed_receipt (__main__.Lifecycle) ... ok
+test_expiry_kills_stalled_event_loop_and_descendants (__main__.Lifecycle) ... ok
+test_foreign_marker_is_preserved_on_cleanup (__main__.Lifecycle) ... ok
+test_interrupt_exact_identity_and_status_reconnect (__main__.Lifecycle) ... ok
+test_malformed_receipts_are_durably_failed_and_reaped (__main__.Lifecycle) ... ok
+test_quiet_exit_is_failure (__main__.Lifecycle) ... ok
+test_stalled_input_cannot_block_watchdog_deadline (__main__.Lifecycle) ... ok
+test_wrong_extension_event_is_failure (__main__.Lifecycle) ... ok
+test_fixture_openssl_sign_verify_and_tamper (__main__.OwnerRecords) ... skipped 'native Ed25519 producer proof requires OpenSSL 3; Linux proof must run this case'
+test_mutation_producer_binds_exact_preview_and_credit (__main__.OwnerRecords) ... ok
+test_publish_refuses_relative_path_without_root_fallback (__main__.OwnerRecords) ... ok
+test_publish_replaces_link_without_following_and_refuses_linked_parent (__main__.OwnerRecords) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 4.508s
+
+OK (skipped=1)
+{"classification":"fake-sdk-and-confined-tools-only","checks":88,"nativeInteropSigned":0,"nativeInteropCapability":"skipped-native-openssl-3-required","actualSdkSessions":0,"providerCalls":0}
