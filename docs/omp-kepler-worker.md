@@ -31,8 +31,12 @@ Negative zero serializes as zero; nonfinite numbers, unpaired surrogates, and nu
 This serialization is shared by the Python producer and TypeScript verifier and preserves finite fractional model costs and receipt timestamps.
 The SDK runtime is private Bun 1.4.0 plus the complete SDK 18.1.11 dependency tree; a monolithic OMP CLI executable does not provide this SDK.
 The controller's `tree_digest` function owns dependency-tree serialization.
-The host requires Linux, `/usr/bin/python3`, `/usr/bin/openssl` with Ed25519 `pkeyutl`, Git, and a working Unix socket directory.
+The host requires Linux, `/usr/bin/python3`, `/usr/bin/openssl` with Ed25519 `pkeyutl`, `/usr/bin/git`, and a working Unix socket directory.
 Keep the signing key and owner control records outside worker-visible paths and preserve one trusted writer for the worktree.
+Every host-record path that controls a read, write, import, execution, or owner-key check must be absolute and already canonical; relative paths and symlink-normalized aliases are refused before effects.
+The signed capsule's worktree and credential file must also be absolute and canonical.
+Exact-head validation uses fixed `/usr/bin/git` with a bounded environment, not ambient `PATH` or user Git configuration.
+The adapter source directory, pinned Bun binary, pinned `node_modules`, state root, capsule root, and credential file must not overlap the assigned model-editable worktree.
 The observed Hermes Kepler server runs as root, so the prepared registration invokes a fixed `/usr/sbin/runuser -u fm-omp-worker -- ... launch <task>` handoff after validating the capsule and worktree.
 The host record binds that literal unprivileged account's verified UID and primary GID; a missing or mismatched account refuses before SDK imports.
 Provision that account, its private credential/state directories, worktree access, and the fixed runuser dependency only after the separate installation decision.
