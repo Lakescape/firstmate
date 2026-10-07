@@ -71,7 +71,9 @@ def bind_credit(record, capsule, capsule_hash, now):
 
 
 def publish(path, envelope, mode):
-    # The worker owns the request directory: never follow an owner-next symlink.
+    path = Path(path)
+    if not path.is_absolute() or path.parent.resolve() != path.parent or path.name in ('', '.', '..'):
+        raise ValueError('canonical_publish_path_required')
     parent_fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     temporary = f'.owner-{uuid.uuid4()}.next'
     try:
@@ -104,7 +106,8 @@ def main():
     controller.owned_host(KEY)
     if KEY.stat().st_mode & 0o077:
         raise ValueError('private_owner_key_custody_required')
-    target = Path(host['capsuleRoot']) / f'{task}.json'
+    paths = controller.host_paths(host)
+    target = paths['capsuleRoot'] / f'{task}.json'
     if action == 'capsule':
         if len(sys.argv) != 4:
             raise ValueError('invalid_capsule_arguments')
@@ -117,7 +120,7 @@ def main():
         capsule = controller.verify_envelope(json.loads(target.read_text()), host['ownerPublicKey'])
         controller.validate(capsule, host, task)
         capsule_hash = hashlib.sha256(controller.canonical(capsule)).hexdigest()
-        state = Path(host['stateRoot']) / task
+        state = paths['stateRoot'] / task
         if action == 'mutation':
             if len(sys.argv) != 5 or not re.fullmatch(r'[0-9a-f-]{36}', sys.argv[3]) or sys.argv[4] not in ('approve', 'deny'):
                 raise ValueError('exact_mutation_nonce_and_decision_required')

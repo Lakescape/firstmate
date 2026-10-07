@@ -15,6 +15,7 @@ if __name__ == '__main__' and sys.platform == 'linux':
 LIMIT = 65536
 PROTECTED = {'.git', '.omp', '.pi', '.claude', '.codex', '.env', '.ssh', '.aws', '.netrc', '.npmrc',
              'state', 'control', 'config', 'credentials', 'credentials.json', 'auth.db', 'auth.json'}
+SOURCE = Path(__file__).resolve().parent
 
 
 def protected(name):
@@ -28,6 +29,17 @@ def digest(value):
     return hashlib.sha256(module.canonical(value)).hexdigest()
 
 
+def canonical_root(root):
+    if not isinstance(root, str):
+        raise ValueError('canonical_root_required')
+    path = Path(root)
+    if not path.is_absolute() or path.resolve() != path:
+        raise ValueError('canonical_root_required')
+    if path == SOURCE or path in SOURCE.parents or SOURCE in path.parents:
+        raise ValueError('trusted_source_inside_worker_scope')
+    return root
+
+
 def parts(path):
     if not isinstance(path, str) or not path or os.path.isabs(path) or '\x00' in path:
         raise ValueError('relative_path_required')
@@ -38,6 +50,7 @@ def parts(path):
 
 
 def parent(root, path):
+    root = canonical_root(root)
     names = parts(path)
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -144,7 +157,7 @@ def execute(root, args, expected=None, write_fn=None):
 
 
 def grep(root, path, text):
-    # Literal search over one approved relative directory, bounded files/output.
+    root = canonical_root(root)
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         if path != '.':
@@ -194,8 +207,7 @@ if __name__ == '__main__':
     try:
         request = json.load(sys.stdin)
         root = request['root']
-        if os.path.realpath(root) != root:
-            raise ValueError('canonical_root_required')
+        canonical_root(root)
         mode, args = request['mode'], request['args']
         if mode == 'preview':
             result = preview(root, args)[0]

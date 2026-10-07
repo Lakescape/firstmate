@@ -87,7 +87,8 @@ try {
   check(() => assert.throws(() => verifyCredit(signedCredit({...credit, usageEvidenceRef: ""}), c, digest(c), key, now)));
 
   const broker = new ApprovalBroker(c, digest(c), key, () => clock);
-  const helper = join(import.meta.dir, "../bin/omp-kepler/fs_boundary.py");
+  const helper = realpathSync(join(import.meta.dir, "../bin/omp-kepler/fs_boundary.py"));
+  check(() => assert.throws(() => fileOperation("/usr/bin/python3", helper, realpathSync(join(import.meta.dir, "../bin/omp-kepler")), "execute", {operation: "read", path: "controller.py"})));
   writeFileSync(join(root, "file.txt"), "original\n");
   const tools = createConfinedTools(broker, "/usr/bin/python3", helper);
   check(() => assert.deepEqual(tools.map(t => t.name), c.tools));

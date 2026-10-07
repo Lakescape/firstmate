@@ -1,12 +1,24 @@
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { readFile, writeFile, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ApprovalBroker, type MutationPreview, type SignedReceipt, canonical } from "./contract";
 
+function canonicalExistingPath(value: string): string {
+  if (typeof value !== "string" || !isAbsolute(value) || realpathSync(value) !== value) throw Error("filesystem_boundary_refused");
+  return value;
+}
+function overlaps(left: string, right: string): boolean {
+  const distance = relative(left, right);
+  return distance === "" || (!distance.startsWith("..") && !isAbsolute(distance));
+}
 export function fileOperation(python: string, helper: string, root: string, mode: string, args: unknown, expected?: MutationPreview): unknown {
-  const result = spawnSync(python, ["-I", helper], {input: canonical({root, mode, args, ...(expected ? {expected} : {})}),
+  const canonicalHelper = canonicalExistingPath(helper);
+  const canonicalRoot = canonicalExistingPath(root);
+  if (overlaps(dirname(canonicalHelper), canonicalRoot)) throw Error("filesystem_boundary_refused");
+  const result = spawnSync(python, ["-I", canonicalHelper], {input: canonical({root: canonicalRoot, mode, args, ...(expected ? {expected} : {})}),
     encoding: "utf8", timeout: 3000, maxBuffer: 131072, env: {PATH: "/usr/bin:/bin", LANG: "C.UTF-8"}});
   if (result.status !== 0 || result.error) throw Error("filesystem_boundary_refused");
   const response = JSON.parse(result.stdout);

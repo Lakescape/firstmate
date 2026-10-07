@@ -1,7 +1,7 @@
 // Programmatic, one-prompt worker. Importing this module does not import OMP.
-import { readFileSync, statSync, fstatSync, mkdirSync } from "node:fs";
+import { readFileSync, statSync, fstatSync, mkdirSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingsOptions } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -23,6 +23,14 @@ export const PINNED = {
   "features.unexpectedStopDetection": "none",
 } satisfies NonNullable<SettingsOptions["overrides"]>;
 
+function canonicalExistingPath(value: string, error: string): string {
+  if (typeof value !== "string" || !isAbsolute(value) || realpathSync(value) !== value) throw Error(error);
+  return value;
+}
+function overlaps(left: string, right: string): boolean {
+  const distance = relative(left, right);
+  return distance === "" || (!distance.startsWith("..") && !isAbsolute(distance));
+}
 export function assertSettings(settings: Settings): void {
   for (const [key, value] of Object.entries(PINNED)) {
     if (canonical(settings.get(key as Parameters<Settings["get"]>[0])) !== canonical(value)) throw Error("effective_policy_changed");
@@ -133,7 +141,12 @@ async function main(): Promise<void> {
   if (!credential || credential.length > 16384) throw Error("custodied_credential_missing");
   const checkCredit = (): void => verifyCredit(JSON.parse(readFileSync(join(payload.state, "credit.json"), "utf8")), c, payload.capsuleHash, payload.ownerPublicKey);
   checkCredit();
-  const root = join(c.runtime.nodeModules, "@oh-my-pi/pi-coding-agent/src");
+  const runtimeModules = canonicalExistingPath(c.runtime.nodeModules, "canonical_runtime_path_required");
+  const runtimeBun = canonicalExistingPath(c.runtime.bun, "canonical_runtime_path_required");
+  const worktree = canonicalExistingPath(c.worktree, "canonical_worktree_required");
+  const source = canonicalExistingPath(import.meta.dir, "canonical_source_path_required");
+  if ([runtimeModules, runtimeBun, source].some(path => overlaps(worktree, path))) throw Error("trusted_paths_inside_worker_scope");
+  const root = join(runtimeModules, "@oh-my-pi/pi-coding-agent/src");
   // These are the first operational SDK imports, after all authority gates.
   const sdk: typeof import("@oh-my-pi/pi-coding-agent/sdk") = await import(join(root, "sdk.ts"));
   const settingsModule: typeof import("@oh-my-pi/pi-coding-agent/config/settings") = await import(join(root, "config/settings.ts"));

@@ -29,10 +29,44 @@ from urllib.parse import urlsplit
 SOURCE = Path(__file__).resolve().parent
 HOST = Path('/etc/firstmate/omp-kepler/host.json')
 TASK_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$')
+GIT = '/usr/bin/git'
+GIT_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C',
+           'HOME': '/nonexistent', 'XDG_CONFIG_HOME': '/nonexistent',
+           'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+           'GIT_CONFIG_COUNT': '0', 'GIT_TERMINAL_PROMPT': '0'}
 
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def canonical_path(value, error):
+    if not isinstance(value, str):
+        raise ValueError(error)
+    path = Path(value)
+    if not path.is_absolute() or path.resolve() != path:
+        raise ValueError(error)
+    return path
+
+
+def overlaps(left, right):
+    left, right = Path(left).resolve(), Path(right).resolve()
+    return left == right or left in right.parents or right in left.parents
+
+
+def host_paths(host):
+    runtime = host.get('runtime')
+    if not isinstance(runtime, dict):
+        raise ValueError('canonical_host_path_required')
+    allowed = host.get('allowedWorktrees')
+    if not isinstance(allowed, list) or not allowed:
+        raise ValueError('canonical_host_path_required')
+    return {'ownerPublicKey': canonical_path(host.get('ownerPublicKey'), 'canonical_host_path_required'),
+            'stateRoot': canonical_path(host.get('stateRoot'), 'canonical_host_path_required'),
+            'capsuleRoot': canonical_path(host.get('capsuleRoot'), 'canonical_host_path_required'),
+            'allowedWorktrees': [canonical_path(path, 'canonical_host_path_required') for path in allowed],
+            'runtime': {'bun': canonical_path(runtime.get('bun'), 'canonical_runtime_path_required'),
+                        'nodeModules': canonical_path(runtime.get('nodeModules'), 'canonical_runtime_path_required')}}
 
 
 def canonical(value):
@@ -105,8 +139,9 @@ def owned_host(path):
 def load_host():
     owned_host(HOST)
     host = json.loads(HOST.read_text())
-    owned_host(host['ownerPublicKey'])
-    if sha(host['ownerPublicKey']) != host['ownerPublicKeySha256']:
+    paths = host_paths(host)
+    owned_host(paths['ownerPublicKey'])
+    if sha(paths['ownerPublicKey']) != host['ownerPublicKeySha256']:
         raise ValueError('owner_key_changed')
     return host
 
@@ -147,7 +182,7 @@ def verify_envelope(envelope, key):
 
 
 def tree_digest(root):
-    root = Path(root)
+    root = canonical_path(str(root), 'canonical_runtime_path_required')
     entries = []
     for path in sorted(root.rglob('*')):
         if path.is_symlink():
@@ -162,6 +197,7 @@ def tree_digest(root):
 
 def validate(c, host, task, now=None):
     now = time.time() if now is None else now
+    paths = host_paths(host)
     if c.get('version') != 1 or c.get('task') != task or not TASK_RE.fullmatch(task):
         raise ValueError('task_capsule_refused')
     if host.get('issue') != 'ATX-2170' or host.get('scope') != 'command-center-pilot' or host.get('task') != task or c.get('issue') != 'ATX-2170' or c.get('scope') != 'command-center-pilot' or not task.startswith('ATX-2170'):
@@ -199,27 +235,30 @@ def validate(c, host, task, now=None):
         raise ValueError('unaliased_credential_free_endpoint_required')
     if not isinstance(c.get('brief'), str) or not c['brief'].strip() or len(c['brief']) > 65536:
         raise ValueError('approved_brief_required')
-    worktree = Path(c['worktree'])
-    if not worktree.is_dir() or str(worktree.resolve()) != str(worktree):
+    worktree = canonical_path(c.get('worktree'), 'canonical_worktree_required')
+    if not worktree.is_dir():
         raise ValueError('canonical_worktree_required')
     if host.get('allowedWorktrees') != [str(worktree)]:
         raise ValueError('single_command_center_worktree_required')
-    state = Path(host['stateRoot']) / task
-    if state.resolve() == worktree or worktree in state.resolve().parents or state.resolve() in worktree.parents:
+    state = paths['stateRoot'] / task
+    if overlaps(worktree, state) or overlaps(worktree, paths['capsuleRoot']):
         raise ValueError('paths_not_separate')
+    for trusted in (SOURCE, paths['runtime']['bun'], paths['runtime']['nodeModules']):
+        if overlaps(worktree, trusted):
+            raise ValueError('trusted_paths_inside_worker_scope')
     neutral_discovery_root(state.resolve() / 'bootstrap')
-    head = subprocess.run(['git', '-C', str(worktree), 'rev-parse', 'HEAD'], check=True,
+    head = subprocess.run([GIT, '-C', str(worktree), 'rev-parse', 'HEAD'], check=True, env=GIT_ENV,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5).stdout.decode().strip()
-    top = subprocess.run(['git', '-C', str(worktree), 'rev-parse', '--show-toplevel'], check=True,
+    top = subprocess.run([GIT, '-C', str(worktree), 'rev-parse', '--show-toplevel'], check=True, env=GIT_ENV,
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5).stdout.decode().strip()
     if head != c.get('head') or str(Path(top).resolve()) != str(worktree):
         raise ValueError('exact_worktree_head_required')
     runtime = host['runtime']
     if c.get('runtime') != runtime or runtime.get('bunVersion') != '1.4.0' or runtime.get('sdkVersion') != '18.1.11':
         raise ValueError('pinned_runtime_required')
-    if sha(runtime['bun']) != runtime['bunSha256'] or tree_digest(runtime['nodeModules']) != runtime['nodeModulesSha256']:
+    if sha(paths['runtime']['bun']) != runtime['bunSha256'] or tree_digest(paths['runtime']['nodeModules']) != runtime['nodeModulesSha256']:
         raise ValueError('runtime_bytes_changed')
-    package = Path(runtime['nodeModules']) / '@oh-my-pi/pi-coding-agent/package.json'
+    package = paths['runtime']['nodeModules'] / '@oh-my-pi/pi-coding-agent/package.json'
     if json.loads(package.read_text())['version'] != '18.1.11':
         raise ValueError('sdk_version_changed')
     actual_sources = {p.name: sha(p) for p in SOURCE.iterdir() if p.suffix in ('.py', '.ts')}
@@ -228,8 +267,8 @@ def validate(c, host, task, now=None):
         raise ValueError('source_bytes_changed')
     if not isinstance(c.get('credentialFile'), str):
         raise ValueError('custodied_credential_descriptor_required')
-    credential = Path(c['credentialFile'])
-    if worktree == credential.resolve() or worktree in credential.resolve().parents:
+    credential = canonical_path(c.get('credentialFile'), 'canonical_credential_path_required')
+    if overlaps(worktree, credential):
         raise ValueError('credential_inside_worker_scope')
     return state
 
@@ -568,7 +607,7 @@ def main():
     host = load_host()
     if task != host.get('task'):
         raise ValueError('named_worker_task_required')
-    state = Path(host['stateRoot']) / task
+    state = host_paths(host)['stateRoot'] / task
     if action in ('status', 'interrupt'):
         record = json.loads((state / 'receipt.json').read_text())
         if action == 'status':
@@ -595,7 +634,7 @@ def main():
         if not accepted or not stopped:
             sys.exit(1)
         return
-    envelope_path = Path(host['capsuleRoot']) / f'{task}.json'
+    envelope_path = host_paths(host)['capsuleRoot'] / f'{task}.json'
     if envelope_path.is_symlink() or envelope_path.stat().st_mode & 0o222:
         raise ValueError('immutable_capsule_required')
     envelope = json.loads(envelope_path.read_text())
@@ -631,7 +670,7 @@ def main():
     os.close(claim_fd)
     home = state / 'bootstrap'
     home.mkdir(mode=0o700)
-    credential_path = Path(capsule['credentialFile'])
+    credential_path = canonical_path(capsule.get('credentialFile'), 'canonical_credential_path_required')
     s = credential_path.stat()
     if credential_path.is_symlink() or not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_uid != os.getuid() or s.st_mode & 0o077:
         raise ValueError('private_credential_custody_required')
@@ -643,9 +682,9 @@ def main():
         payload = {'capsule': capsule, 'capsuleHash': hashlib.sha256(canonical(capsule)).hexdigest(),
                    'ownerPublicKey': Path(host['ownerPublicKey']).read_text(), 'state': str(state),
                    'credentialFd': credential_fd}
-        result = supervise([host['runtime']['bun'], '--no-env-file', str(SOURCE / 'worker.ts')],
+        result = supervise([str(host_paths(host)['runtime']['bun']), '--no-env-file', str(SOURCE / 'worker.ts')],
                            state, capsule['deadline'], clean_env(home), payload, (credential_fd,),
-                           Path(host['stateRoot']) / '.leases' / hashlib.sha256(capsule['worktree'].encode()).hexdigest())
+                           host_paths(host)['stateRoot'] / '.leases' / hashlib.sha256(capsule['worktree'].encode()).hexdigest())
         print(json.dumps({'state': result['state'], 'reaped': result['reaped'], 'exitCode': result['exitCode']}))
         if result['state'] != 'completed':
             sys.exit(1)

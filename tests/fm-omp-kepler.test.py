@@ -273,6 +273,55 @@ class Lifecycle(unittest.TestCase):
 
 
 class Entry(unittest.TestCase):
+    def valid_capsule_host(self, root):
+        task = 'ATX-2170'
+        worktree = root / 'worktree'
+        worktree.mkdir()
+        (worktree / 'README.md').write_text('fixture\n')
+        subprocess.run(['/usr/bin/git', 'init', '-q', str(worktree)], check=True)
+        subprocess.run(['/usr/bin/git', '-C', str(worktree), 'add', 'README.md'], check=True)
+        subprocess.run(['/usr/bin/git', '-C', str(worktree), '-c', 'user.name=Fixture',
+                        '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+                        'commit', '-q', '-m', 'fixture'], check=True)
+        head = subprocess.run(['/usr/bin/git', '-C', str(worktree), 'rev-parse', 'HEAD'],
+                              stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+        runtime_root = root / 'runtime'
+        modules = runtime_root / 'node_modules'
+        package = modules / '@oh-my-pi/pi-coding-agent/package.json'
+        package.parent.mkdir(parents=True)
+        package.write_text('{"version":"18.1.11"}\n')
+        bun = runtime_root / 'bun'
+        bun.write_text('#!/bin/sh\n')
+        os.chmod(bun, 0o755)
+        runtime = {'bun': str(bun), 'bunVersion': '1.4.0', 'bunSha256': controller.sha(bun),
+                   'sdkVersion': '18.1.11', 'nodeModules': str(modules),
+                   'nodeModulesSha256': controller.tree_digest(modules)}
+        source = {p.name: controller.sha(p) for p in (ROOT / 'bin/omp-kepler').iterdir() if p.suffix in ('.py', '.ts')}
+        source['fm-omp-kepler.sh'] = controller.sha(ROOT / 'bin/fm-omp-kepler.sh')
+        now = int(time.time())
+        capsule = {'version': 1, 'task': task, 'issue': 'ATX-2170', 'scope': 'command-center-pilot',
+                   'role': 'scout', 'backend': 'orca', 'cockpit': 'kepler', 'launchSurface': 'manual-terminal',
+                   'supervisor': 'firstmate', 'keplerTaskId': None, 'keplerWorktreeId': None,
+                   'tools': ['read', 'grep'], 'authority': 'owner-approved-activation', 'ownerAction': 'ATX-1758-approved',
+                   'gates': {'provider': True, 'installation': False, 'login': False, 'merge': False, 'production': False},
+                   'issuedAt': now - 1, 'deadline': now + 300,
+                   'credit': {'included': True, 'overage': 0, 'validUntil': now + 300},
+                   'model': {'provider': 'fixture', 'id': 'fixture-model', 'api': 'openai-completions',
+                             'baseUrl': 'https://example.invalid/v1'},
+                   'fallback': False, 'brief': 'inert', 'worktree': str(worktree), 'head': head,
+                   'runtime': runtime, 'sourceHashes': source, 'credentialFile': str(root / 'credential')}
+        owner = root / 'owner.pub'
+        owner.write_text('fixture-public-key')
+        host = {'issue': 'ATX-2170', 'scope': 'command-center-pilot', 'task': task,
+                'workerAccount': {'name': 'fm-omp-worker', 'uid': 65533, 'gid': 65533},
+                'allowedWorktrees': [str(worktree)], 'ownerPublicKey': str(owner),
+                'ownerPublicKeySha256': controller.sha(owner), 'stateRoot': str(root / 'state'),
+                'capsuleRoot': str(root / 'capsules'), 'runtime': runtime, 'sourceHashes': source}
+        (root / 'state').mkdir()
+        (root / 'capsules').mkdir()
+        (root / 'credential').write_text('fixture')
+        return capsule, host, task, now
+
     def test_neutral_discovery_refuses_another_repo_and_ambient_sources(self):
         with tempfile.TemporaryDirectory(prefix='fm-omp-ancestry-') as directory:
             root = Path(directory).resolve()
@@ -298,11 +347,81 @@ class Entry(unittest.TestCase):
                            'model': {'provider': 'fixture', 'id': 'fixture', 'api': 'fixture', 'baseUrl': 'https://example.invalid'},
                            'fallback': False, 'brief': 'inert', 'worktree': str(assigned)}
                 host = {'issue': 'ATX-2170', 'scope': 'command-center-pilot', 'task': 'ATX-2170',
-                        'allowedWorktrees': [str(assigned)], 'stateRoot': str(root / 'state')}
+                        'allowedWorktrees': [str(assigned)], 'stateRoot': str(root / 'state'),
+                        'capsuleRoot': str(root / 'capsules'), 'ownerPublicKey': str(root / 'owner.pub'),
+                        'runtime': {'bun': str(root / 'runtime/bun'), 'nodeModules': str(root / 'runtime/node_modules')}}
                 with self.assertRaisesRegex(ValueError, 'ambient_startup_discovery_refused'):
                     controller.validate(capsule, host, 'ATX-2170', 101)
             finally:
                 assigned.rmdir()
+
+    def test_validate_rejects_relative_host_paths_before_effects(self):
+        with tempfile.TemporaryDirectory(prefix='fm-host-paths-') as directory:
+            root = Path(directory).resolve()
+            capsule, host, task, now = self.valid_capsule_host(root)
+            fake = root / 'fake-bin'
+            fake.mkdir()
+            marker = root / 'ambient-git-ran'
+            git = fake / 'git'
+            git.write_text(f'#!/bin/sh\n: > {str(marker)!r}\nexit 99\n')
+            os.chmod(git, 0o755)
+            original_path = os.environ.get('PATH', '')
+            try:
+                os.environ['PATH'] = str(fake) + os.pathsep + original_path
+                for mutate in (
+                    lambda h, c: h.update(stateRoot='state'),
+                    lambda h, c: h.update(capsuleRoot='capsules'),
+                    lambda h, c: h.update(allowedWorktrees=['worktree']),
+                    lambda h, c: h['runtime'].update(bun='runtime/bun'),
+                    lambda h, c: h['runtime'].update(nodeModules='runtime/node_modules'),
+                    lambda h, c: c.update(credentialFile='credential'),
+                ):
+                    changed_host = json.loads(json.dumps(host))
+                    changed_capsule = json.loads(json.dumps(capsule))
+                    mutate(changed_host, changed_capsule)
+                    with self.subTest(host=changed_host, credential=changed_capsule.get('credentialFile')):
+                        with self.assertRaisesRegex(ValueError, 'canonical_.*path_required'):
+                            controller.validate(changed_capsule, changed_host, task, now)
+                self.assertFalse(marker.exists())
+            finally:
+                os.environ['PATH'] = original_path
+
+    def test_validate_uses_fixed_git_and_sanitized_environment(self):
+        with tempfile.TemporaryDirectory(prefix='fm-fixed-git-') as directory:
+            root = Path(directory).resolve()
+            capsule, host, task, now = self.valid_capsule_host(root)
+            fake = root / 'fake-bin'
+            fake.mkdir()
+            marker = root / 'ambient-git-ran'
+            git = fake / 'git'
+            git.write_text(f'#!/bin/sh\n: > {str(marker)!r}\nexit 99\n')
+            os.chmod(git, 0o755)
+            original_path = os.environ.get('PATH', '')
+            original_git_config = os.environ.get('GIT_CONFIG_COUNT')
+            try:
+                os.environ['PATH'] = str(fake) + os.pathsep + original_path
+                os.environ['GIT_CONFIG_COUNT'] = '1'
+                self.assertEqual(controller.validate(capsule, host, task, now), root / 'state' / task)
+                self.assertFalse(marker.exists())
+            finally:
+                os.environ['PATH'] = original_path
+                if original_git_config is None:
+                    os.environ.pop('GIT_CONFIG_COUNT', None)
+                else:
+                    os.environ['GIT_CONFIG_COUNT'] = original_git_config
+
+    def test_validate_rejects_mutable_adapter_source_overlap(self):
+        with tempfile.TemporaryDirectory(prefix='fm-source-overlap-') as directory:
+            root = Path(directory).resolve()
+            capsule, host, task, now = self.valid_capsule_host(root)
+            capsule['worktree'] = str(ROOT)
+            host['allowedWorktrees'] = [str(ROOT)]
+            with self.assertRaisesRegex(ValueError, 'trusted_paths_inside_worker_scope'):
+                controller.validate(capsule, host, task, now)
+
+    def test_filesystem_boundary_refuses_mutable_helper_overlap(self):
+        with self.assertRaisesRegex(ValueError, 'trusted_source_inside_worker_scope'):
+            boundary.preview(str(ROOT / 'bin/omp-kepler'), {'operation': 'read', 'path': 'controller.py'})
 
     def test_finite_safe_canonical_boundaries(self):
         self.assertEqual(controller.canonical([1.0, -0.0]), b'[1,0]')
@@ -338,6 +457,18 @@ class Entry(unittest.TestCase):
 
 
 class OwnerRecords(unittest.TestCase):
+    def test_publish_refuses_relative_path_without_root_fallback(self):
+        with tempfile.TemporaryDirectory(prefix='fm-owner-relative-') as directory:
+            root = Path(directory).resolve()
+            original = Path.cwd()
+            try:
+                os.chdir(root)
+                with self.assertRaisesRegex(ValueError, 'canonical_publish_path_required'):
+                    signer.publish(Path('capsules') / 'ATX-2170.json', {'fixture': True}, 0o644)
+                self.assertFalse((root / 'ATX-2170.json').exists())
+            finally:
+                os.chdir(original)
+
     def test_publish_replaces_link_without_following_and_refuses_linked_parent(self):
         with tempfile.TemporaryDirectory(prefix='fm-owner-publish-fixture-') as directory:
             root = Path(directory).resolve()
@@ -349,7 +480,7 @@ class OwnerRecords(unittest.TestCase):
             self.assertEqual(outside.read_text(), 'preserve')
             self.assertEqual(json.loads(target.read_text()), {'fixture': True})
             (root / 'alias').symlink_to(root, target_is_directory=True)
-            with self.assertRaises(OSError):
+            with self.assertRaises((ValueError, OSError)):
                 signer.publish(root / 'alias' / 'other.json', {'fixture': True}, 0o644)
 
     def test_mutation_producer_binds_exact_preview_and_credit(self):
