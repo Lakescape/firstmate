@@ -156,6 +156,18 @@ epoch_outcome() {
   sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
 }
 
+epoch_generation() {
+  sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null | head -n 1
+}
+
+nonexistent_pid() {
+  local pid=999999
+  while kill -0 "$pid" 2>/dev/null; do
+    pid=$((pid + 1))
+  done
+  printf '%s\n' "$pid"
+}
+
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
@@ -568,6 +580,29 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
+# A frozen in-flight arming row whose owner is gone must not block the next
+# eligible claim. The claim advances the generation and leaves a planted
+# watcher lock alone.
+test_dead_arming_owner_reclaim_advances_generation() {
+  local dir status dead before after
+  dir=$(make_primary_dir "$TMP_ROOT/dead-arming")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  dead=$(nonexistent_pid)
+  before=4488
+  printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n' "$before" "$dead" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  mkdir -p "$dir/state/.watch.lock"
+  printf 'sentinel\n' > "$dir/state/.watch.lock/pid"
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
+  after=$(epoch_generation "$dir")
+  expect_code 2 "$status" "a dead arming owner must not block the next rewake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed arming claim must finish as rewake, got: $(epoch_outcome "$dir")"
+  [ "$after" -gt "$before" ] || fail "dead arming owner did not advance the epoch generation ($before -> $after)"
+  [ "$(cat "$dir/state/.watch.lock/pid")" = sentinel ] || fail "dead-owner reclaim removed the watcher lock"
+  [ -e "$dir/state/arm-ran" ] || fail "dead arming owner blocked the new arm"
+  pass "auto-arm: a dead arming owner is reclaimed, the generation advances, and the watcher lock stays"
+}
+
 test_fm_lock_status_still_works_with_shared_lib() {
   local out
   out=$(FM_HOME="$TMP_ROOT/lock-status-home" bash "$ROOT/bin/fm-lock.sh" status 2>&1)
@@ -596,4 +631,5 @@ test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
+test_dead_arming_owner_reclaim_advances_generation
 test_fm_lock_status_still_works_with_shared_lib

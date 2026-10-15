@@ -1389,6 +1389,18 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   pass "fm-turnend-guard --claude: concurrent auto-arm and guard resets are idempotent and deadlock-free"
 }
 
+test_hook_claude_mode_dead_arming_owner_blocks() {
+  local dir out status dead
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-dead-arming")
+  : > "$dir/state/task1.meta"
+  dead=$(nonexistent_pid)
+  printf 'epoch=9 owner_pid=%s outcome=arming updated_at=%s\n' "$dead" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must not treat a dead arming owner as recovery"
+  assert_contains "$out" "TURN WOULD END BLIND" "dead arming owner must still block the stop"
+  pass "fm-turnend-guard --claude: a dead in-flight arming owner is not recovery"
+}
+
 test_hook_claude_mode_stale_rewake_epoch_blocks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stale-epoch")
@@ -1590,6 +1602,7 @@ test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
+test_hook_claude_mode_dead_arming_owner_blocks
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
