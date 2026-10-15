@@ -48,9 +48,8 @@
 #   1. a live identity-matched watcher with a fresh beacon allows immediately;
 #   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
 #      for the auto-arm to claim this home (state/.claude-autoarm.lock owner
-#      alive), for the epoch ledger to name a live owner of an in-flight
-#      arming claim, or to record a fresh actionable exit-2 outcome
-#      (state/.claude-autoarm-epoch) for this event epoch - any proof allows
+#      alive) or to record a fresh actionable exit-2 outcome
+#      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
@@ -244,10 +243,6 @@ autoarm_owns_recovery() {
   pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
-    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
-    return 0
-  fi
-  if fm_autoarm_claim_open "$STATE/.claude-autoarm-epoch"; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi

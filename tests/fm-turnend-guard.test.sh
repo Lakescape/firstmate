@@ -1389,32 +1389,16 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   pass "fm-turnend-guard --claude: concurrent auto-arm and guard resets are idempotent and deadlock-free"
 }
 
-test_hook_claude_mode_live_epoch_owner_allows_and_dead_owner_does_not() {
-  local dir out status pid identity dead
-  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-epoch-owner")
+test_hook_claude_mode_dead_arming_owner_blocks() {
+  local dir out status dead
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-dead-arming")
   : > "$dir/state/task1.meta"
-  sleep 60 &
-  pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "could not identify the live epoch owner"; }
-  printf 'epoch=9 owner_pid=%s outcome=arming updated_at=%s\n%s\n' "$pid" "$(date +%s)" "$identity" > "$dir/state/.claude-autoarm-epoch"
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  expect_code 0 "$status" "--claude mode must allow a stop whose in-flight arming owner is still alive"
-  [ -z "$out" ] || fail "live epoch owner allow produced output: $out"
-  assert_absent "$dir/state/.claude-autoarm.lock" "the epoch-owner allow required the owner lock"
-
-  printf 'epoch=9 owner_pid=%s outcome=arming updated_at=%s\n%s\n' "$pid" "$(date +%s)" "foreign-identity" > "$dir/state/.claude-autoarm-epoch"
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  expect_code 2 "$status" "--claude mode must not treat a recycled pid as the arming owner"
-  assert_contains "$out" "TURN WOULD END BLIND" "recycled-pid arming claim must still block"
-
   dead=$(nonexistent_pid)
   printf 'epoch=9 owner_pid=%s outcome=arming updated_at=%s\n' "$dead" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
   expect_code 2 "$status" "--claude mode must not treat a dead arming owner as recovery"
   assert_contains "$out" "TURN WOULD END BLIND" "dead arming owner must still block the stop"
-  pass "fm-turnend-guard --claude: a live arming owner allows the stop, and a dead or recycled owner does not"
+  pass "fm-turnend-guard --claude: a dead in-flight arming owner is not recovery"
 }
 
 test_hook_claude_mode_stale_rewake_epoch_blocks() {
@@ -1618,7 +1602,7 @@ test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
-test_hook_claude_mode_live_epoch_owner_allows_and_dead_owner_does_not
+test_hook_claude_mode_dead_arming_owner_blocks
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once

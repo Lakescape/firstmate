@@ -168,16 +168,6 @@ nonexistent_pid() {
   printf '%s\n' "$pid"
 }
 
-seed_epoch_claim() { # <dir> <epoch> <pid> <outcome> [identity]
-  local dir=$1 epoch=$2 pid=$3 outcome=$4 identity=${5:-}
-  {
-    printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' "$epoch" "$pid" "$outcome" "$(date +%s)"
-    if [ -n "$identity" ]; then
-      printf '%s\n' "$identity"
-    fi
-  } > "$dir/state/.claude-autoarm-epoch"
-}
-
 watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
@@ -590,102 +580,27 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
-# A frozen in-flight arming row whose owner is gone must not wedge the home.
-# Reclaim advances the generation, records the abandoned claim, and leaves a
-# planted watcher lock alone.
+# A frozen in-flight arming row whose owner is gone must not block the next
+# eligible claim. The claim advances the generation and leaves a planted
+# watcher lock alone.
 test_dead_arming_owner_reclaim_advances_generation() {
-  local dir out status dead before after
+  local dir status dead before after
   dir=$(make_primary_dir "$TMP_ROOT/dead-arming")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
   dead=$(nonexistent_pid)
   before=4488
-  seed_epoch_claim "$dir" "$before" "$dead" arming "stale autoarm identity"
+  printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n' "$before" "$dead" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
   mkdir -p "$dir/state/.watch.lock"
   printf 'sentinel\n' > "$dir/state/.watch.lock/pid"
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
   after=$(epoch_generation "$dir")
-  expect_code 2 "$status" "a dead arming owner must still rewake once the claim is reclaimed"
-  assert_contains "$out" "recovered a dead owner claim" "dead arming reclaim must be visible"
-  assert_contains "$out" "epoch $before pid $dead outcome arming" "recovery must name the abandoned claim"
+  expect_code 2 "$status" "a dead arming owner must not block the next rewake"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed arming claim must finish as rewake, got: $(epoch_outcome "$dir")"
   [ "$after" -gt "$before" ] || fail "dead arming owner did not advance the epoch generation ($before -> $after)"
-  assert_present "$dir/state/.claude-autoarm-dead-owner" "dead arming owner left no recovery record"
-  assert_contains "$(cat "$dir/state/.claude-autoarm-dead-owner")" "epoch=$before owner_pid=$dead outcome=arming" "recovery record must preserve the abandoned claim"
   [ "$(cat "$dir/state/.watch.lock/pid")" = sentinel ] || fail "dead-owner reclaim removed the watcher lock"
   [ -e "$dir/state/arm-ran" ] || fail "dead arming owner blocked the new arm"
   pass "auto-arm: a dead arming owner is reclaimed, the generation advances, and the watcher lock stays"
-}
-
-# A finished rewake whose owner has exited is reclaimable too, without a
-# false failure record. The owner exiting after rewake is the normal close.
-test_dead_rewake_owner_reclaim_advances_generation() {
-  local dir out status dead before after
-  dir=$(make_primary_dir "$TMP_ROOT/dead-rewake")
-  : > "$dir/state/task.meta"
-  write_arm_fixture "$dir" actionable
-  dead=$(nonexistent_pid)
-  before=4488
-  seed_epoch_claim "$dir" "$before" "$dead" rewake
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  after=$(epoch_generation "$dir")
-  expect_code 2 "$status" "a dead rewake owner must allow the next arm"
-  assert_not_contains "$out" "recovered a dead owner claim" "a finished rewake must not be reported as an abandoned claim"
-  [ "$(epoch_outcome "$dir")" = rewake ] || fail "dead rewake reclaim must record a new rewake, got: $(epoch_outcome "$dir")"
-  [ "$after" -gt "$before" ] || fail "dead rewake owner did not advance the epoch generation ($before -> $after)"
-  assert_absent "$dir/state/.claude-autoarm-dead-owner" "finished rewake wrote a dead-owner failure record"
-  pass "auto-arm: a dead rewake owner is reclaimed without a false failure record"
-}
-
-# A live owner of an in-flight or just-finished claim blocks the next claim
-# even when the owner lock is already gone. A recycled pid whose identity does
-# not match is not that owner.
-test_live_owner_blocks_reclaim_and_pid_reuse_does_not() {
-  local dir out status pid identity before after
-  dir=$(make_primary_dir "$TMP_ROOT/live-owner-blocks")
-  : > "$dir/state/task.meta"
-  write_arm_fixture "$dir" actionable
-  sleep 60 &
-  pid=$!
-  identity=$(watcher_identity "$dir" "$pid") || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "could not identify the live epoch owner"; }
-  seed_epoch_claim "$dir" 11 "$pid" arming "$identity"
-  mkdir -p "$dir/state/.claude-autoarm.lock"
-  printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
-  printf 'autoarm\n' > "$dir/state/.claude-autoarm.lock/role"
-  cp "$dir/state/.claude-autoarm-epoch" "$dir/state/epoch-before"
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "a live auto-arm lock owner must keep the hook inert"
-  [ ! -e "$dir/state/arm-ran" ] || fail "a live lock owner still armed"
-  cmp -s "$dir/state/epoch-before" "$dir/state/.claude-autoarm-epoch" || fail "a live lock owner changed the epoch ledger"
-  [ "$(cat "$dir/state/.claude-autoarm.lock/pid")" = "$pid" ] || fail "the live owner lock was cleared or replaced"
-  assert_absent "$dir/state/.claude-autoarm-dead-owner" "a live lock owner was recorded as dead"
-
-  rm -rf "$dir/state/.claude-autoarm.lock"
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "a live epoch owner must block reclaim after the lock is gone"
-  [ ! -e "$dir/state/arm-ran" ] || fail "a live epoch owner still armed"
-  cmp -s "$dir/state/epoch-before" "$dir/state/.claude-autoarm-epoch" || fail "a live epoch owner changed the epoch ledger"
-  assert_absent "$dir/state/.claude-autoarm-dead-owner" "a live epoch owner was recorded as dead"
-  [ -z "$out" ] || fail "a blocked live owner produced output: $out"
-
-  seed_epoch_claim "$dir" 11 "$pid" rewake "$identity"
-  cp "$dir/state/.claude-autoarm-epoch" "$dir/state/epoch-before"
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "a live identity-matched rewake owner must block reclaim"
-  cmp -s "$dir/state/epoch-before" "$dir/state/.claude-autoarm-epoch" || fail "a live rewake owner changed the epoch ledger"
-  [ ! -e "$dir/state/arm-ran" ] || fail "a live rewake owner still armed"
-
-  seed_epoch_claim "$dir" 11 "$pid" arming "foreign-identity"
-  before=11
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  after=$(epoch_generation "$dir")
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  expect_code 2 "$status" "a recycled pid with a foreign identity must be reclaimed"
-  [ "$after" -gt "$before" ] || fail "pid reuse did not advance the epoch generation ($before -> $after)"
-  assert_present "$dir/state/.claude-autoarm-dead-owner" "pid reuse left no recovery record"
-  assert_contains "$(cat "$dir/state/.claude-autoarm-dead-owner")" "owner_pid=$pid outcome=arming" "pid-reuse recovery must name the mismatched claim"
-  pass "auto-arm: a live owner blocks reclaim, and a mismatched identity does not"
 }
 
 test_fm_lock_status_still_works_with_shared_lib() {
@@ -717,6 +632,4 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_dead_arming_owner_reclaim_advances_generation
-test_dead_rewake_owner_reclaim_advances_generation
-test_live_owner_blocks_reclaim_and_pid_reuse_does_not
 test_fm_lock_status_still_works_with_shared_lib

@@ -42,9 +42,7 @@
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
 # allow a stop whose recovery this hook already owns, instead of forcing a
-# duplicate continuation for the same event epoch. Dead-owner reclaim of an
-# in-flight arming claim is fm_autoarm_claim_next in bin/fm-wake-lib.sh.
-# The failure marker
+# duplicate continuation for the same event epoch. The failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
 # and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
 # suppresses any later automatic continuation in that unresolved episode.
@@ -134,16 +132,20 @@ fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
 write_epoch() {  # <outcome>
-  fm_autoarm_claim_next "$EPOCH" "$1"
+  local outcome=$1 seq tmp
+  seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
+  case "$seq" in
+    ''|*[!0-9]*) seq=0 ;;
+  esac
+  seq=$((seq + 1))
+  tmp="$EPOCH.tmp.$$"
+  printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$EPOCH" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
 }
 
-if ! write_epoch arming; then
-  exit 0
-fi
-if [ "${FM_AUTOARM_RECOVERED:-}" = 1 ]; then
-  printf 'firstmate watcher auto-arm recovered a dead owner claim (epoch %s pid %s outcome %s).\n' \
-    "${FM_AUTOARM_RECOVERED_EPOCH:-}" "${FM_AUTOARM_RECOVERED_PID:-}" "${FM_AUTOARM_RECOVERED_OUTCOME:-}" >&2
-fi
+write_epoch arming
 
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
