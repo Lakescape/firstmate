@@ -585,9 +585,9 @@ fm_autoarm_claim_open() { # <epoch-path>
 }
 
 fm_autoarm_record_dead_owner() { # <state-dir> <epoch> <pid> <outcome> <updated-at> <identity>
-  local state_dir=$1 epoch=$2 pid=$3 outcome=$4 updated=$5 identity=$6 now marker tmp
+  local state_dir=$1 epoch=$2 pid=$3 outcome=$4 updated=$5 identity=$6 now recovery_path tmp
   now=$(date +%s)
-  marker="$state_dir/.claude-autoarm-dead-owner"
+  recovery_path="$state_dir/.claude-autoarm-dead-owner"
   tmp=$(mktemp "$state_dir/.claude-autoarm-dead-owner.tmp.XXXXXX") || return 1
   {
     printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s recovered_at=%s\n' \
@@ -596,7 +596,7 @@ fm_autoarm_record_dead_owner() { # <state-dir> <epoch> <pid> <outcome> <updated-
       printf '%s\n' "$identity"
     fi
   } > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$recovery_path" || { rm -f "$tmp"; return 1; }
   # shellcheck disable=SC2034 # Read by fm-claude-stop-autoarm.sh after a dead-owner supersede.
   FM_AUTOARM_RECOVERED=1
   # shellcheck disable=SC2034 # Read by fm-claude-stop-autoarm.sh after a dead-owner supersede.
