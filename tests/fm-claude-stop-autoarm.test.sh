@@ -580,27 +580,37 @@ test_active_in_marked_secondmate_home() {
   pass "auto-arm: active in a marked secondmate home"
 }
 
-# A frozen in-flight arming row whose owner is gone must not block the next
-# eligible claim. The claim advances the generation and leaves a planted
-# watcher lock alone.
-test_dead_arming_owner_reclaim_advances_generation() {
-  local dir status dead before after
+# An eligible Stop overwrites a frozen in-flight arming row. The ledger
+# owner_pid is not consulted: a dead pid and a live unrelated pid both advance.
+test_frozen_arming_row_does_not_block_eligible_stop() {
+  local dir status dead before after pid
   dir=$(make_primary_dir "$TMP_ROOT/dead-arming")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
   dead=$(nonexistent_pid)
   before=4488
   printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n' "$before" "$dead" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
-  mkdir -p "$dir/state/.watch.lock"
-  printf 'sentinel\n' > "$dir/state/.watch.lock/pid"
   run_autoarm "$dir" >/dev/null 2>&1; status=$?
   after=$(epoch_generation "$dir")
-  expect_code 2 "$status" "a dead arming owner must not block the next rewake"
-  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed arming claim must finish as rewake, got: $(epoch_outcome "$dir")"
-  [ "$after" -gt "$before" ] || fail "dead arming owner did not advance the epoch generation ($before -> $after)"
-  [ "$(cat "$dir/state/.watch.lock/pid")" = sentinel ] || fail "dead-owner reclaim removed the watcher lock"
-  [ -e "$dir/state/arm-ran" ] || fail "dead arming owner blocked the new arm"
-  pass "auto-arm: a dead arming owner is reclaimed, the generation advances, and the watcher lock stays"
+  expect_code 2 "$status" "a frozen arming row must not block the next rewake"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "frozen arming claim must finish as rewake, got: $(epoch_outcome "$dir")"
+  [ "$after" -gt "$before" ] || fail "frozen arming row did not advance the epoch generation ($before -> $after)"
+  [ -e "$dir/state/arm-ran" ] || fail "frozen arming row blocked the new arm"
+
+  rm -f "$dir/state/arm-ran" "$dir/state/.claude-autoarm-epoch"
+  sleep 60 &
+  pid=$!
+  before=$after
+  printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n' "$before" "$pid" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  run_autoarm "$dir" >/dev/null 2>&1; status=$?
+  after=$(epoch_generation "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a live ledger pid must not block the next eligible Stop"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "live ledger pid kept the arming row, got: $(epoch_outcome "$dir")"
+  [ "$after" -gt "$before" ] || fail "live ledger pid did not advance the epoch generation ($before -> $after)"
+  [ -e "$dir/state/arm-ran" ] || fail "live ledger pid blocked the new arm"
+  pass "auto-arm: an eligible Stop overwrites a frozen arming row, dead or live pid"
 }
 
 test_fm_lock_status_still_works_with_shared_lib() {
@@ -631,5 +641,5 @@ test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
-test_dead_arming_owner_reclaim_advances_generation
+test_frozen_arming_row_does_not_block_eligible_stop
 test_fm_lock_status_still_works_with_shared_lib
