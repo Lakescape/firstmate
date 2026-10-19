@@ -57,7 +57,9 @@
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
 #      hard 8-consecutive-block override - then allow one loud attended
-#      fail-open only for an already verified failure episode.
+#      fail-open for an already verified failure episode, or for an in-flight
+#      arming claim that still has no live auto-arm owner. That frozen arming
+#      claim counts on every block; every other epoch identity counts once.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -204,7 +206,8 @@ budget_account_current_epoch() {
     esac
     if [ "$old_session" = "$SESSION_ID" ]; then
       COUNT=$old_count
-      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
+      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ] \
+        && ! frozen_arming_claim "$outcome"; then
         :
       else
         COUNT=$((COUNT + 1))
@@ -237,12 +240,25 @@ budget_account_current_epoch() {
   return 0
 }
 
-autoarm_owns_recovery() {
-  local pid role outcome age
-  fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
+autoarm_owner_live() {
+  local pid role
   pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
   role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
-  if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+  fm_pid_alive "$pid" && [ "$role" = autoarm ]
+}
+
+# 0 when outcome is arming and no live auto-arm owner holds the lock.
+# Ledger owner_pid is not a liveness source.
+frozen_arming_claim() { # <outcome>
+  [ "$1" = arming ] || return 1
+  autoarm_owner_live && return 1
+  return 0
+}
+
+autoarm_owns_recovery() {
+  local outcome age
+  fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
+  if autoarm_owner_live; then
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
@@ -330,8 +346,11 @@ terminal_fail_open() {
 failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
-  [ -e "$FAILURE_NOTICE" ] || return 1
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  if frozen_arming_claim "$outcome"; then
+    return 0
+  fi
+  [ -e "$FAILURE_NOTICE" ] || return 1
   case "$outcome" in
     failed|failed-suppressed) return 0 ;;
     *) return 1 ;;
@@ -369,7 +388,12 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  stuck_outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  if frozen_arming_claim "$stuck_outcome"; then
+    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm left an in-flight arming claim with no live owner, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  else
+    printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  fi
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0
