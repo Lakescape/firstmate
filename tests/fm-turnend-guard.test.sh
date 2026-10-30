@@ -1389,6 +1389,52 @@ test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
   pass "fm-turnend-guard --claude: concurrent auto-arm and guard resets are idempotent and deadlock-free"
 }
 
+test_hook_claude_mode_dead_arming_owner_blocks() {
+  local dir out status dead
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-dead-arming")
+  : > "$dir/state/task1.meta"
+  dead=$(nonexistent_pid)
+  printf 'epoch=9 owner_pid=%s outcome=arming updated_at=%s\n' "$dead" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=200 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "--claude mode must not treat a dead arming owner as recovery"
+  assert_contains "$out" "TURN WOULD END BLIND" "dead arming owner must still block the stop"
+  pass "fm-turnend-guard --claude: a dead in-flight arming owner is not recovery"
+}
+
+test_hook_claude_mode_frozen_arming_reaches_attended_fail_open() {
+  local dir out status i count afk
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-arming")
+  : > "$dir/state/task1.meta"
+  printf 'epoch=4488 owner_pid=%s outcome=arming updated_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  for i in 1 2 3; do
+    out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+    expect_code 2 "$status" "frozen arming block $i must stay a blind stop"
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+    [ "$count" = "$i" ] || fail "frozen arming block $i left count $count"
+  done
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "an exhausted frozen arming claim must take the attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "frozen arming fail-open was not unmistakable"
+  assert_contains "$out" 'in-flight arming claim' "frozen arming fail-open described a verified failure instead"
+  assert_contains "$out" 'Keep this session attended' "frozen arming fail-open omitted the attended-session action"
+  assert_not_contains "$out" 'fm-watch-arm.sh' "frozen arming fail-open assigned a manual watcher launch"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "frozen arming fail-open did not consume the episode alarm"
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "a consumed frozen-arming alarm must make the next unhealthy stop block"
+  assert_not_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "frozen arming alarm repeated in one episode"
+
+  afk=$(make_primary_dir "$TMP_ROOT/hook-claude-frozen-arming-afk")
+  : > "$afk/state/task1.meta"
+  : > "$afk/state/.afk"
+  printf 'epoch=4488 owner_pid=%s outcome=arming updated_at=%s\n' "$(nonexistent_pid)" "$(date +%s)" > "$afk/state/.claude-autoarm-epoch"
+  seed_claude_budget "$afk" 4 4488
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$afk" true); status=$?
+  expect_code 2 "$status" "away mode must not fail open on a frozen arming claim"
+  assert_contains "$out" 'Away mode owns watcher supervision' "away-mode frozen arming block lost its daemon ownership guidance"
+  assert_absent "$afk/state/.claude-autoarm-failure-alarmed" "away mode consumed the frozen-arming attended alarm"
+  pass "fm-turnend-guard --claude: a frozen arming claim reaches one attended fail-open, and away mode does not"
+}
+
 test_hook_claude_mode_stale_rewake_epoch_blocks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stale-epoch")
@@ -1590,6 +1636,8 @@ test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
 test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
 test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
+test_hook_claude_mode_dead_arming_owner_blocks
+test_hook_claude_mode_frozen_arming_reaches_attended_fail_open
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
